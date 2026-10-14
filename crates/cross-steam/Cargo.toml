@@ -1,0 +1,23 @@
+[package]
+name = "cross-steam"
+description = "Steam inside a bottle: install, patches, game library, launching"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cross-bottle = { path = "../cross-bottle" }
+cross-core = { path = "../cross-core" }
+cross-engine = { path = "../cross-engine" }
+serde.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+sha2.workspace = true
+
+[lints]
+workspace = true

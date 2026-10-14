@@ -1,0 +1,33 @@
+name: Nightly (real Wine)
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  real-wine:
+    name: integration tests on real Wine
+    runs-on: macos-15 # Apple Silicon; Rosetta is preinstalled on GitHub's images
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Ensure Rosetta 2
+        run: |
+          if [ ! -f /Library/Apple/usr/libexec/oah/libRosettaRuntime ]; then
+            sudo softwareupdate --install-rosetta --agree-to-license
+          fi
+      - name: Install a Wine engine with cross
+        run: cargo run -q -p cross-cli -- engine install wine-devel-11.18
+        env:
+          CROSS_APP_HOME: ${{ runner.temp }}/cross-home
+      - name: Run ignored integration tests
+        run: cargo test -p cross-bottle --test real_wine -- --ignored --test-threads=1
+        env:
+          CROSS_TEST_ENGINES_HOME: ${{ runner.temp }}/cross-home

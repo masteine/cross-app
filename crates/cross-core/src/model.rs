@@ -1,0 +1,265 @@
+//! Domain types: engines, bottles, apps and launch profiles.
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+use crate::{Error, Result};
+
+/// How x86_64 Windows code ends up running on Apple Silicon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Translation {
+    /// Intel Wine build executed through Rosetta 2.
+    #[default]
+    Rosetta,
+    /// ARM64EC Wine with a bundled x86 emulator (FEX and friends).
+    Native,
+    /// An engine owned by another product (e.g. CrossOver) that we only drive.
+    External,
+}
+
+/// How Direct3D calls reach Metal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum GraphicsBackend {
+    /// Apple's D3DMetal from the Game Porting Toolkit (DX11/DX12).
+    #[default]
+    D3dMetal,
+    /// DXVK on top of MoltenVK (DX9/10/11).
+    Dxvk,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum WindowsVersion {
+    Win7,
+    Win8,
+    Win10,
+    #[default]
+    Win11,
+}
+
+impl WindowsVersion {
+    /// Value Wine stores in `HKCU\\Software\\Wine\\Version`.
+    pub fn wine_name(self) -> &'static str {
+        match self {
+            WindowsVersion::Win7 => "win7",
+            WindowsVersion::Win8 => "win8",
+            WindowsVersion::Win10 => "win10",
+            WindowsVersion::Win11 => "win11",
+        }
+    }
+}
+
+/// An installed Wine build.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Engine {
+    pub id: String,
+    pub wine_version: String,
+    #[serde(default)]
+    pub translation: Translation,
+}
+
+impl Engine {
+    pub fn requires_rosetta(&self) -> bool {
+        self.translation == Translation::Rosetta
+    }
+}
+
+/// Per-program settings applied when launching an executable inside a bottle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct LaunchProfile {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<PathBuf>,
+    /// Overrides the bottle's graphics backend for this program.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<GraphicsBackend>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    /// DLL name -> mode (`n`, `b`, `n,b`, `d` ...).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub dll_overrides: BTreeMap<String, String>,
+}
+
+impl LaunchProfile {
+    /// Value for `WINEDLLOVERRIDES`, e.g. `d3d11=n,b;dxgi=n`. `None` when empty.
+    pub fn wine_dll_overrides(&self) -> Option<String> {
+        if self.dll_overrides.is_empty() {
+            return None;
+        }
+        Some(
+            self.dll_overrides
+                .iter()
+                .map(|(dll, mode)| format!("{dll}={mode}"))
+                .collect::<Vec<_>>()
+                .join(";"),
+        )
+    }
+
+    /// Environment to set for the child process: `env` plus `WINEDLLOVERRIDES`.
+    /// An explicit `WINEDLLOVERRIDES` in `env` wins.
+    pub fn launch_env(&self) -> BTreeMap<String, String> {
+        let mut env = self.env.clone();
+        if let Some(overrides) = self.wine_dll_overrides() {
+            env.entry("WINEDLLOVERRIDES".to_owned())
+                .or_insert(overrides);
+        }
+        env
+    }
+}
+
+/// A launchable program registered in a bottle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct App {
+    pub name: String,
+    /// Path to the `.exe`/`.msi`/`.lnk`, usually a Windows path inside the prefix.
+    pub path: PathBuf,
+    /// Steam appid, when the app comes from Steam.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steam_appid: Option<u32>,
+    #[serde(default)]
+    pub profile: LaunchProfile,
+}
+
+/// Where a dependency came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DepSource {
+    /// Our own verb catalog.
+    #[default]
+    Catalog,
+    /// The system `winetricks` (fallback for verbs we do not carry).
+    Winetricks,
+}
+
+/// A dependency installed into a bottle (`[deps.<verb>]` in `bottle.toml`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DepRecord {
+    pub installed_unix: u64,
+    #[serde(default)]
+    pub source: DepSource,
+}
+
+/// Steam installed into a bottle by `cross steam install` (`[steam]` in `bottle.toml`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SteamRecord {
+    /// Revision of `steam-patches.toml` last applied to this bottle.
+    pub patches_revision: u32,
+    /// SHA-256 of the `SteamSetup.exe` that was run.
+    pub installer_sha256: String,
+    pub installed_unix: u64,
+}
+
+/// An isolated Wine prefix plus its settings. Persisted as `bottle.toml`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Bottle {
+    pub id: String,
+    pub name: String,
+    /// Id of the engine this bottle uses; `None` until one is chosen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
+    #[serde(default)]
+    pub windows_version: WindowsVersion,
+    #[serde(default)]
+    pub backend: GraphicsBackend,
+    /// Creation time, seconds since the Unix epoch.
+    #[serde(default)]
+    pub created_unix: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub apps: Vec<App>,
+    /// Installed dependencies by verb name (`vcrun2022`, `dxvk`, ...).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub deps: BTreeMap<String, DepRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steam: Option<SteamRecord>,
+}
+
+impl Bottle {
+    pub fn new(id: impl Into<String>, name: impl Into<String>) -> Result<Self> {
+        let id = id.into();
+        validate_bottle_id(&id)?;
+        Ok(Self {
+            id,
+            name: name.into(),
+            engine: None,
+            windows_version: WindowsVersion::default(),
+            backend: GraphicsBackend::default(),
+            created_unix: 0,
+            apps: Vec::new(),
+            deps: BTreeMap::new(),
+            steam: None,
+        })
+    }
+}
+
+/// Bottle ids become directory names, so keep them boring and path-safe.
+pub fn validate_bottle_id(id: &str) -> Result<()> {
+    let valid_char = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_';
+    let starts_ok = id
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+    if id.len() <= 64 && starts_ok && id.chars().all(valid_char) {
+        Ok(())
+    } else {
+        Err(Error::InvalidBottleId(id.to_owned()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bottle_ids_are_path_safe() {
+        for ok in ["demo", "steam-2", "a_b", "0day"] {
+            assert!(validate_bottle_id(ok).is_ok(), "{ok}");
+        }
+        for bad in ["", "-x", "_x", "Demo", "a/b", "..", "a b", &"x".repeat(65)] {
+            assert!(validate_bottle_id(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn dll_overrides_are_joined_deterministically() {
+        let mut p = LaunchProfile::default();
+        assert_eq!(p.wine_dll_overrides(), None);
+        p.dll_overrides.insert("dxgi".into(), "n".into());
+        p.dll_overrides.insert("d3d11".into(), "n,b".into());
+        assert_eq!(p.wine_dll_overrides().as_deref(), Some("d3d11=n,b;dxgi=n"));
+    }
+
+    #[test]
+    fn explicit_env_overrides_dll_overrides_field() {
+        let mut p = LaunchProfile::default();
+        p.dll_overrides.insert("dxgi".into(), "n".into());
+        p.env.insert("WINEDLLOVERRIDES".into(), "custom=d".into());
+        p.env.insert("WINEMSYNC".into(), "1".into());
+        let env = p.launch_env();
+        assert_eq!(env["WINEDLLOVERRIDES"], "custom=d");
+        assert_eq!(env["WINEMSYNC"], "1");
+    }
+
+    #[test]
+    fn windows_versions_map_to_wine_names() {
+        assert_eq!(WindowsVersion::Win11.wine_name(), "win11");
+        assert_eq!(WindowsVersion::Win7.wine_name(), "win7");
+        assert_eq!(WindowsVersion::default(), WindowsVersion::Win11);
+    }
+
+    #[test]
+    fn rosetta_requirement_follows_translation() {
+        let mut e = Engine {
+            id: "wine-11".into(),
+            wine_version: "11.16".into(),
+            translation: Translation::Rosetta,
+        };
+        assert!(e.requires_rosetta());
+        e.translation = Translation::Native;
+        assert!(!e.requires_rosetta());
+    }
+}

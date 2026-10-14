@@ -1,0 +1,47 @@
+# Steam-specific patches, kept apart from cross-app releases: a newer copy can be
+# fetched with `cross steam patches --update` (it must carry a higher `revision`).
+#
+# Sources: the `steam` verb in winetricks (Wine bug numbers below). None of these
+# has been verified on our own test matrix yet (the Sprint 0 recipe is pending).
+schema = 1
+revision = 1
+
+[installer]
+# Unchanged since 2024-05-20 (Last-Modified); hash as pinned by winetricks on 2025-04-03.
+# When Valve ships a new SteamSetup.exe, publish a new revision with its hash.
+url = "https://cdn.akamai.steamstatic.com/client/installer/SteamSetup.exe"
+sha256 = "7d3654531c32d941b8cae81c4137fc542172bfa9635f169cb392f245a0a12bcb"
+size = 2380800
+# NSIS silent install.
+args = ["/S"]
+
+[launch]
+# Wine bug 49839 (macOS): steamwebhelper.exe crashes unless Steam starts with these.
+args = ["-allosarches", "-cef-force-32bit", "-cef-in-process-gpu", "-cef-disable-sandbox"]
+
+# Wine bug 22053: the Steam overlay crashes some games. winetricks disables the
+# 32-bit overlay DLL; we also disable its 64-bit sibling.
+[[registry]]
+reason = "Wine bug 22053: Steam overlay crashes games (32-bit)"
+key = 'HKCU\Software\Wine\DllOverrides'
+name = "gameoverlayrenderer"
+data = ""
+
+[[registry]]
+reason = "Wine bug 22053: Steam overlay crashes games (64-bit)"
+key = 'HKCU\Software\Wine\DllOverrides'
+name = "gameoverlayrenderer64"
+data = ""
+
+[[registry]]
+reason = "Wine bug 44985: Store and Library stay blank"
+key = 'HKCU\Software\Wine\AppDefaults\steamwebhelper.exe\DllOverrides'
+name = "libglesv2"
+data = ""
+
+[[registry]]
+reason = "macOS: crashing vulkandriverquery helpers should not pop up crash dialogs"
+key = 'HKCU\Software\Wine\WineDbg'
+name = "ShowCrashDialog"
+type = "dword"
+data = "0"

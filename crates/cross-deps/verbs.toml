@@ -1,0 +1,73 @@
+# Verb catalog: what `cross deps install <bottle> <verb>` does.
+#
+# A verb is a list of downloads (pinned by SHA-256) and steps:
+#   run       run a downloaded installer inside the bottle
+#   copy      copy files into the prefix (from a component of the bottle's engine)
+#   override  set DLL overrides (HKCU\Software\Wine\DllOverrides)
+#   registry  write a registry value
+schema = 1
+
+# Visual C++ 2015-2022 runtime, release 14.36.32532 (2023-07-04).
+# URLs are immutable (the SHA-256 is part of the path), unlike aka.ms/vs/17/release/*,
+# which moves with every Microsoft release and would break the pinned hash.
+# Hashes come from winetricks' verb list. Unlike winetricks we do not replace
+# msvcp140/msvcp140_2 by hand (that needs cabextract), so the installer may leave
+# Wine's built-in copies of those two in place.
+[verbs.vcrun2022]
+title = "Visual C++ 2015-2022 runtime (14.36)"
+
+[[verbs.vcrun2022.downloads]]
+id = "x86"
+file = "VC_redist.x86.exe"
+url = "https://download.visualstudio.microsoft.com/download/pr/eaab1f82-787d-4fd7-8c73-f782341a0c63/5365A927487945ECB040E143EA770ADBB296074ECE4021B1D14213BDE538C490/VC_redist.x86.exe"
+sha256 = "5365a927487945ecb040e143ea770adbb296074ece4021b1d14213bde538c490"
+size = 13837672
+
+[[verbs.vcrun2022.downloads]]
+id = "x64"
+file = "VC_redist.x64.exe"
+url = "https://download.visualstudio.microsoft.com/download/pr/eaab1f82-787d-4fd7-8c73-f782341a0c63/917C37D816488545B70AFFD77D6E486E4DD27E2ECE63F6BBAAF486B178B2B888/VC_redist.x64.exe"
+sha256 = "917c37d816488545b70affd77d6e486e4dd27e2ece63f6bbaaf486b178b2b888"
+size = 25355496
+
+[[verbs.vcrun2022.steps]]
+kind = "override"
+dlls = ["concrt140", "msvcp140", "msvcp140_1", "msvcp140_2", "msvcp140_atomic_wait", "msvcp140_codecvt_ids", "vcamp140", "vccorlib140", "vcomp140", "vcruntime140", "vcruntime140_1"]
+mode = "native,builtin"
+
+[[verbs.vcrun2022.steps]]
+kind = "run"
+download = "x86"
+args = ["/q", "/norestart"]
+# 0 = ok, 1638 = a newer or equal version is already present, 3010 = ok, reboot requested.
+ok_exit = [0, 1638, 3010]
+
+[[verbs.vcrun2022.steps]]
+kind = "run"
+download = "x64"
+args = ["/q", "/norestart"]
+ok_exit = [0, 1638, 3010]
+
+# DXVK (Direct3D 9/10/11 over Vulkan/MoltenVK). Needs an engine installed with
+# `cross engine install <engine> --dxvk`; nothing is downloaded here.
+[verbs.dxvk]
+title = "DXVK 1.10.3 (macOS async build)"
+
+[[verbs.dxvk.steps]]
+kind = "copy"
+from = "component:dxvk:x86_64-windows"
+to = "system32"
+files = ["*.dll"]
+
+[[verbs.dxvk.steps]]
+kind = "copy"
+from = "component:dxvk:i386-windows"
+to = "syswow64"
+files = ["*.dll"]
+
+# This "builtin" build ships only d3d10core and d3d11; dxgi stays Wine's own, so it
+# must not be overridden (a native override with no native file would fail to load).
+[[verbs.dxvk.steps]]
+kind = "override"
+dlls = ["d3d10core", "d3d11"]
+mode = "native"

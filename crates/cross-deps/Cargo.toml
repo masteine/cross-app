@@ -1,0 +1,23 @@
+[package]
+name = "cross-deps"
+description = "Declarative Windows dependencies (vcrun, dxvk, ...) for bottles: a winetricks-style verb catalog"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cross-bottle = { path = "../cross-bottle" }
+cross-core = { path = "../cross-core" }
+cross-engine = { path = "../cross-engine" }
+serde.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

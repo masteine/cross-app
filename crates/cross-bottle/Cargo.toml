@@ -1,0 +1,21 @@
+[package]
+name = "cross-bottle"
+description = "Bottles (Wine prefixes): creation, running programs, processes and registry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cross-core = { path = "../cross-core" }
+cross-engine = { path = "../cross-engine" }
+serde.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+toml.workspace = true
+
+[lints]
+workspace = true
