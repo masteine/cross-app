@@ -153,6 +153,10 @@ fn log_bottle(command: &Command) -> Option<&str> {
     }
 }
 
+/// Log target of the per-command start/finish lines: file only, the terminal
+/// already shows the command's own output and errors.
+const LIFECYCLE: &str = "cross::lifecycle";
+
 /// Terminal filter for `-q` / `-v` / `-vv` / `-vvv`.
 fn stderr_filter(verbose: u8, quiet: bool) -> String {
     let level = match (quiet, verbose) {
@@ -160,9 +164,9 @@ fn stderr_filter(verbose: u8, quiet: bool) -> String {
         (false, 0) => "warn",
         (false, 1) => "info",
         (false, 2) => "debug",
-        (false, _) => return "trace".to_owned(),
+        (false, _) => return format!("trace,{LIFECYCLE}=off"),
     };
-    format!("{level},{}", logging::QUIET_DEPENDENCIES)
+    format!("{level},{},{LIFECYCLE}=off", logging::QUIET_DEPENDENCIES)
 }
 
 fn run(cli: Cli) -> Result<ExitCode> {
@@ -201,12 +205,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
     let _entered = span.enter();
     let started = Instant::now();
     tracing::info!(
+        target: LIFECYCLE,
         version,
         args = %cross_bottle::exec::redact(&format!("{:?}", std::env::args().skip(1).collect::<Vec<_>>())),
         data_dir = %dirs.root().display(),
         "command started"
     );
     tracing::debug!(
+        target: LIFECYCLE,
         rust_log = ?std::env::var("RUST_LOG").ok(),
         winedebug = ?std::env::var("WINEDEBUG").ok(),
         cross_app_home = ?std::env::var("CROSS_APP_HOME").ok(),
@@ -216,8 +222,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
     let result = dispatch(cli.command, &dirs, &config);
     let elapsed_ms = started.elapsed().as_millis() as u64;
     match &result {
-        Ok(code) => tracing::info!(elapsed_ms, exit = ?code, "command finished"),
+        Ok(code) => tracing::info!(target: LIFECYCLE, elapsed_ms, exit = ?code, "command finished"),
         Err(err) => tracing::error!(
+            target: LIFECYCLE,
             elapsed_ms,
             error = %cross_core::chain_message(err.as_ref()),
             "command failed"
@@ -340,7 +347,8 @@ mod tests {
         assert!(stderr_filter(0, false).starts_with("warn,"));
         assert!(stderr_filter(1, false).starts_with("info,"));
         assert!(stderr_filter(2, false).starts_with("debug,"));
-        assert_eq!(stderr_filter(3, false), "trace");
+        assert!(stderr_filter(3, false).starts_with("trace,"));
+        assert!(stderr_filter(1, false).contains("cross::lifecycle=off"));
         assert!(stderr_filter(0, true).starts_with("error,"));
     }
 
