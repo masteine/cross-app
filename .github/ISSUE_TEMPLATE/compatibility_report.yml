@@ -1,0 +1,103 @@
+name: Звіт про сумісність гри
+description: Результат запуску гри чи програми (працює, частково, не працює) для бази сумісності
+title: "[compat] <гра> — <статус> — <чип>"
+labels: ["compatibility", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Поля збігаються з форматом запису в `docs/test-matrix.md`, тож звіт без змін переноситься в тестову матрицю і в профілі сумісності.
+        Критерій «зелений»: запуск без ручних дій, стабільні 30+ FPS на M1 у 1080p на середніх налаштуваннях, 15 хвилин без падінь.
+  - type: input
+    id: game
+    attributes:
+      label: Гра або програма
+      placeholder: Hollow Knight
+    validations:
+      required: true
+  - type: input
+    id: appid
+    attributes:
+      label: Steam appid
+      description: З `cross steam games <пляшка>`; для ігор поза Steam напишіть «не Steam» і звідки інсталятор.
+    validations:
+      required: true
+  - type: dropdown
+    id: status
+    attributes:
+      label: Статус
+      options:
+        - зелений (без ручних дій, 30+ FPS)
+        - жовтий (працює з ручними діями, низьким FPS або артефактами)
+        - червоний (не запускається або неграбельна)
+        - червоний (анти-чіт)
+    validations:
+      required: true
+  - type: dropdown
+    id: api
+    attributes:
+      label: Графічний API гри
+      options:
+        - DirectX 9
+        - DirectX 10/11
+        - DirectX 12
+        - Vulkan
+        - OpenGL
+        - не знаю
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Бекенд
+      options:
+        - вбудований Direct3D Wine (за замовчуванням)
+        - DXVK (`--backend dxvk`)
+        - D3DMetal
+  - type: dropdown
+    id: bitness
+    attributes:
+      label: Розрядність гри
+      options:
+        - 64-біт
+        - 32-біт
+        - не знаю
+  - type: input
+    id: mac
+    attributes:
+      label: Mac
+      description: Модель, чип, RAM, версія macOS.
+      placeholder: MacBook Pro 14", M1 Pro, 16 ГБ, macOS 26.5
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Версії cross-app
+      description: "`cross --version`, двигун (`cross engine list --installed`), версія GPTK або «немає»."
+      placeholder: cross 0.1.0-beta, wine-devel-11.18 (+dxvk), GPTK 3.0
+    validations:
+      required: true
+  - type: input
+    id: fps
+    attributes:
+      label: FPS
+      description: Середній і мінімальний (Metal HUD), роздільна здатність і налаштування якості.
+      placeholder: 45 / 30, 1080p, середні
+  - type: textarea
+    id: steps
+    attributes:
+      label: Ручні дії та профіль
+      description: Що довелося змінити, щоб запустилось (залежності, бекенд, env, аргументи, версія Windows). Якщо нічого, напишіть «немає».
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: problems
+    attributes:
+      label: Проблеми
+      description: Падіння, артефакти, звук, ввід, геймпад, Steam overlay, збереження.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Лог
+      description: Для Steam-ігор останні рядки `bottles/<пляшка>/logs/steam.log`. Приберіть особисті дані.
+      render: text
