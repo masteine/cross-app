@@ -1,0 +1,7 @@
+# Issue forms: "Помилка" (bug_report.yml) and "Звіт про сумісність гри" (compatibility_report.yml).
+# When GitHub Discussions (or Discord) is set up, add it here so questions go there:
+# contact_links:
+#   - name: Питання та обговорення
+#     url: <посилання на Discussions>
+#     about: Питання про налаштування, ідеї, загальні обговорення
+blank_issues_enabled: true

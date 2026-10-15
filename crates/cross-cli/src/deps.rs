@@ -4,7 +4,7 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::Subcommand;
-use cross_core::config::BottleStore;
+use cross_bottle::manager::BottleManager;
 use cross_core::model::DepSource;
 use cross_core::paths::AppDirs;
 use cross_deps::install::{InstallOptions, Installer, Status};
@@ -104,7 +104,7 @@ fn warn_about_winetricks(installer: &Installer<'_>, verbs: &[String]) {
 
 fn list(dirs: &AppDirs, installer: &Installer<'_>, bottle: Option<&str>, json: bool) -> Result<()> {
     let installed = match bottle {
-        Some(id) => Some(BottleStore::new(dirs).load(id)?.deps),
+        Some(id) => Some(BottleManager::new(dirs).get(id)?.deps),
         None => None,
     };
     let is_installed = |verb: &str| installed.as_ref().map(|d| d.contains_key(verb));

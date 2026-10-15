@@ -4,7 +4,8 @@ use std::process::ExitCode;
 
 use anyhow::{anyhow, bail, Result};
 use clap::{Subcommand, ValueEnum};
-use cross_core::config::{BottleStore, Config};
+use cross_bottle::manager::BottleManager;
+use cross_core::config::Config;
 use cross_core::model::GraphicsBackend;
 use cross_core::paths::AppDirs;
 use cross_steam::launch::{self, ProfileUpdate};
@@ -134,8 +135,8 @@ pub fn run(command: SteamCommand, dirs: &AppDirs, config: &Config) -> Result<Exi
             }
         }
         SteamCommand::Covers { bottle, force } => {
+            BottleManager::new(dirs).get(&bottle)?;
             let prefix = dirs.bottle_prefix(&bottle);
-            BottleStore::new(dirs).load(&bottle)?;
             let mut missing = 0;
             for game in library::games(&prefix)?.into_iter().filter(|g| !g.is_tool) {
                 match covers::fetch_cover(dirs, game.appid, force)? {
@@ -172,7 +173,7 @@ pub fn run(command: SteamCommand, dirs: &AppDirs, config: &Config) -> Result<Exi
 }
 
 fn games(dirs: &AppDirs, bottle: &str, all: bool, json: bool) -> Result<()> {
-    BottleStore::new(dirs).load(bottle)?;
+    BottleManager::new(dirs).get(bottle)?;
     let games: Vec<_> = library::games(&dirs.bottle_prefix(bottle))?
         .into_iter()
         .filter(|g| all || !g.is_tool)
@@ -222,9 +223,10 @@ fn profile(
     args: Vec<String>,
     clear: bool,
 ) -> Result<()> {
+    // Checked here so a missing bottle is reported as such, not as an I/O error.
+    let b = BottleManager::new(dirs).get(bottle)?;
     let show_only = backend.is_none() && env.is_empty() && args.is_empty() && !clear;
     if show_only {
-        let b = BottleStore::new(dirs).load(bottle)?;
         match launch::game_profile(&b, appid) {
             Some(p) => println!("{}", toml_string(p)?),
             None => println!("No settings for {appid} in {bottle}."),

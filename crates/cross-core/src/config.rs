@@ -83,7 +83,9 @@ impl<'a> BottleStore<'a> {
         write_toml(&self.dirs.bottle_file(&bottle.id), bottle)
     }
 
-    /// All bottles, sorted by id. Directories without a `bottle.toml` are skipped.
+    /// All bottles, sorted by id. Directories without a `bottle.toml` are skipped,
+    /// and so (with a warning) is a `bottle.toml` that cannot be read, so one
+    /// broken bottle does not hide all the others.
     pub fn list(&self) -> Result<Vec<Bottle>> {
         let root = self.dirs.bottles_dir();
         let entries = match fs::read_dir(&root) {
@@ -100,7 +102,12 @@ impl<'a> BottleStore<'a> {
             if validate_bottle_id(&id).is_err() || !self.dirs.bottle_file(&id).is_file() {
                 continue;
             }
-            bottles.push(self.load(&id)?);
+            match self.load(&id) {
+                Ok(bottle) => bottles.push(bottle),
+                Err(err) => {
+                    tracing::warn!(bottle = %id, error = %err, "skipping unreadable bottle")
+                }
+            }
         }
         bottles.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(bottles)
@@ -208,6 +215,13 @@ mod tests {
 
         let ids: Vec<_> = store.list().unwrap().into_iter().map(|b| b.id).collect();
         assert_eq!(ids, ["alpha", "zeta"]);
+
+        // A corrupt bottle.toml is skipped, not fatal for the whole list.
+        fs::create_dir_all(dirs.bottle_dir("broken")).unwrap();
+        fs::write(dirs.bottle_file("broken"), "id = [").unwrap();
+        let ids: Vec<_> = store.list().unwrap().into_iter().map(|b| b.id).collect();
+        assert_eq!(ids, ["alpha", "zeta"]);
+        assert!(store.load("broken").is_err());
     }
 
     #[test]

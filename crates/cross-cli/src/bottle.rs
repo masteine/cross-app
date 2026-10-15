@@ -380,6 +380,14 @@ pub struct RunArgs {
 
 pub fn run_program(args: RunArgs, dirs: &AppDirs) -> Result<ExitCode> {
     let (_, runtime) = Runtime::open(dirs, &args.bottle)?;
+    // Given a folder, Wine opens it in its file manager (explorer.exe) and
+    // `cross run` blocks until that window is closed.
+    if std::path::Path::new(args.target.trim()).is_dir() {
+        bail!(
+            "{} is a folder; pass the program inside it (.exe, .msi, .lnk or .bat)",
+            args.target
+        );
+    }
 
     let mut profile = LaunchProfile::default();
     for item in &args.env {

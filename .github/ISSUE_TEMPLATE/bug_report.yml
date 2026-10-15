@@ -1,0 +1,66 @@
+name: Помилка
+description: cross-app працює не так, як описано, падає або видає незрозумілу помилку
+title: "[bug] "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Дякуємо за звіт! Якщо проблема в конкретній грі чи програмі (не запускається, низький FPS), краще скористатися шаблоном «Звіт про сумісність гри».
+        Перед відправкою приберіть зі вставлених логів усе особисте (ім'я користувача в шляхах, назви приватних файлів).
+  - type: textarea
+    id: what
+    attributes:
+      label: Що сталося
+      description: Що ви робили, що очікували побачити і що побачили натомість.
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Команда і вивід
+      description: Точна команда `cross ...` і повний вивід помилки.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Вивід `cross doctor --json`
+      description: Чип, версія macOS, Rosetta, GPTK.
+      render: json
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Версія cross
+      description: Вивід `cross --version` (або commit, якщо збирали з коду).
+    validations:
+      required: true
+  - type: input
+    id: engine
+    attributes:
+      label: Двигун
+      description: З `cross engine list --installed`, наприклад `wine-devel-11.18 (+dxvk)`.
+  - type: textarea
+    id: crash
+    attributes:
+      label: Звіт про аварію (якщо `cross` упав)
+      description: Вивід `cross crash show`. Звіт зберігається лише на вашому Mac; перегляньте його перед вставкою.
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Лог
+      description: Останні рядки з `~/Library/Application Support/cross-app/bottles/<пляшка>/logs/` або `.../cross-app/logs/`.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Перевірки
+      options:
+        - label: Я переглянув FAQ (`docs/faq.md`) і відкриті issue
+          required: false
+        - label: Проблема не стосується гри з анти-чітом (EAC, BattlEye, Vanguard — not-a-goal)
+          required: false
