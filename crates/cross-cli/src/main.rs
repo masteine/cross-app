@@ -1,6 +1,7 @@
 //! The `cross` command-line interface.
 
 mod bottle;
+mod crash;
 mod deps;
 mod diag;
 mod engine;
@@ -102,6 +103,11 @@ enum Command {
     Logs(logs::LogsArgs),
     /// Collect logs, settings and system info into an archive for bug reports
     Diag(diag::DiagArgs),
+    /// Local crash reports (never uploaded): list, show, clear
+    Crash {
+        #[command(subcommand)]
+        command: crash::CrashCommand,
+    },
 }
 
 impl Command {
@@ -116,6 +122,7 @@ impl Command {
             Command::Steam { .. } => "steam",
             Command::Logs(_) => "logs",
             Command::Diag(_) => "diag",
+            Command::Crash { .. } => "crash",
         }
     }
 }
@@ -125,7 +132,7 @@ fn main() -> ExitCode {
     match run(cli) {
         Ok(code) => code,
         Err(err) => {
-            eprintln!("error: {err:#}");
+            eprintln!("error: {}", cross_core::chain_message(err.as_ref()));
             ExitCode::FAILURE
         }
     }
@@ -139,7 +146,10 @@ fn log_bottle(command: &Command) -> Option<&str> {
         Command::Deps { command } => deps::log_bottle(command),
         Command::Steam { command } => steam::log_bottle(command),
         Command::Logs(args) => args.bottle.as_deref(),
-        Command::Doctor { .. } | Command::Engine { .. } | Command::Diag(_) => None,
+        Command::Doctor { .. }
+        | Command::Engine { .. }
+        | Command::Diag(_)
+        | Command::Crash { .. } => None,
     }
 }
 
@@ -159,8 +169,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
     let dirs = AppDirs::discover()?;
     let config = Config::load(&dirs)?;
 
+    let version = env!("CARGO_PKG_VERSION");
     // `cross logs` reads the log files; it must not add its own lines to them.
     if let Command::Logs(args) = &cli.command {
+        crash::install_hook(&dirs, None, version);
         return logs::run(args, &dirs);
     }
 
@@ -181,13 +193,15 @@ fn run(cli: Cli) -> Result<ExitCode> {
     )
     .map_err(|err| eprintln!("warning: file logging disabled: {err}"))
     .ok();
+    // Panics write a local crash report including the tail of this command's log.
+    crash::install_hook(&dirs, _log_guard.as_ref().map(|g| g.dir.clone()), version);
 
     let name = cli.command.name();
     let span = tracing::info_span!("cmd", name);
     let _entered = span.enter();
     let started = Instant::now();
     tracing::info!(
-        version = env!("CARGO_PKG_VERSION"),
+        version,
         args = %cross_bottle::exec::redact(&format!("{:?}", std::env::args().skip(1).collect::<Vec<_>>())),
         data_dir = %dirs.root().display(),
         "command started"
@@ -203,7 +217,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
     let elapsed_ms = started.elapsed().as_millis() as u64;
     match &result {
         Ok(code) => tracing::info!(elapsed_ms, exit = ?code, "command finished"),
-        Err(err) => tracing::error!(elapsed_ms, error = %format!("{err:#}"), "command failed"),
+        Err(err) => tracing::error!(
+            elapsed_ms,
+            error = %cross_core::chain_message(err.as_ref()),
+            "command failed"
+        ),
     }
     result
 }
@@ -217,6 +235,7 @@ fn dispatch(command: Command, dirs: &AppDirs, config: &Config) -> Result<ExitCod
         Command::Steam { command } => steam::run(command, dirs, config),
         Command::Logs(args) => logs::run(&args, dirs),
         Command::Diag(args) => diag::run(&args, dirs, config),
+        Command::Crash { command } => crash::run(command, dirs),
         Command::Run {
             bottle,
             target,

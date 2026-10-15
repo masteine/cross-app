@@ -32,6 +32,11 @@ pub enum CrashCommand {
     },
 }
 
+/// Install the panic hook that writes crash reports for this process.
+pub fn install_hook(dirs: &AppDirs, log_dir: Option<std::path::PathBuf>, version: &str) {
+    crash::install(crash::CrashContext::new(dirs, log_dir, "cross", version));
+}
+
 pub fn run(command: CrashCommand, dirs: &AppDirs) -> Result<ExitCode> {
     match command {
         CrashCommand::List { json } => {
