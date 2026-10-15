@@ -50,6 +50,10 @@ ok_exit = [0, 1638, 3010]
 
 # DXVK (Direct3D 9/10/11 over Vulkan/MoltenVK). Needs an engine installed with
 # `cross engine install <engine> --dxvk`; nothing is downloaded here.
+# `native = true`: the component is Gcenx's "builtin" repack, whose DLLs carry
+# Wine's builtin marker, and Wine will not load such a file from system32 as a
+# native override. The marker is replaced with the normal DOS stub on copy,
+# which yields exactly the files of the release's non-builtin archive.
 [verbs.dxvk]
 title = "DXVK 1.10.3 (macOS async build)"
 
@@ -58,12 +62,14 @@ kind = "copy"
 from = "component:dxvk:x86_64-windows"
 to = "system32"
 files = ["*.dll"]
+native = true
 
 [[verbs.dxvk.steps]]
 kind = "copy"
 from = "component:dxvk:i386-windows"
 to = "syswow64"
 files = ["*.dll"]
+native = true
 
 # This "builtin" build ships only d3d10core and d3d11; dxgi stays Wine's own, so it
 # must not be overridden (a native override with no native file would fail to load).

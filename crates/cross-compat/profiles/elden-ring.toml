@@ -1,0 +1,27 @@
+# Unverified: written from the source below, never run with cross-app.
+# Settings that need D3DMetal fall back to wined3d until the engine has a
+# D3DMetal overlay; sync modes are skipped on engines without esync/msync.
+
+schema = 1
+id = "elden-ring"
+name = "Elden Ring"
+steam_appid = 1245620
+exe_names = ["eldenring.exe"]
+rating = "yellow"
+backend = "d3dmetal"
+sync = "esync"
+deps = ["vcrun2022"]
+anticheat = "EasyAntiCheat"
+known_bugs = [
+    "Online play is unavailable: Easy Anti-Cheat does not run under Wine on macOS; offline only.",
+    "Shader compilation stutter in open-world areas; the first launch can take minutes.",
+]
+notes = [
+    "DirectX 12 only: needs D3DMetal. The source also sets D3DM_SUPPORT_DXR=0, an undocumented D3DMetal variable that is left out here.",
+]
+
+[source]
+name = "frankea/Whisky community game database (GameDB.json, entry \"elden-ring\")"
+url = "https://github.com/frankea/Whisky/blob/main/WhiskyKit/Sources/WhiskyKit/GameDatabase/Resources/GameDB.json"
+reported_rating = "playable"
+reported_on = "Whisky 3.0.0, Wine 10.0, macOS 15.3, arm64 (tested 2026-01-15 per the source)"

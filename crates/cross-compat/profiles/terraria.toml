@@ -1,0 +1,21 @@
+# Unverified: written from the source below, never run with cross-app.
+# Settings that need D3DMetal fall back to wined3d until the engine has a
+# D3DMetal overlay; sync modes are skipped on engines without esync/msync.
+
+schema = 1
+id = "terraria"
+name = "Terraria"
+steam_appid = 105600
+exe_names = ["Terraria.exe"]
+rating = "green"
+backend = "d3dmetal"
+sync = "msync"
+notes = [
+    "tModLoader may need a .NET runtime, which is not in the cross-app verb catalog.",
+]
+
+[source]
+name = "frankea/Whisky community game database (GameDB.json, entry \"terraria\")"
+url = "https://github.com/frankea/Whisky/blob/main/WhiskyKit/Sources/WhiskyKit/GameDatabase/Resources/GameDB.json"
+reported_rating = "works"
+reported_on = "Whisky 3.0.0, Wine 10.0, macOS 15.3, arm64 (tested 2026-01-20 per the source)"

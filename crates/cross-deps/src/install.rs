@@ -200,13 +200,19 @@ impl<'a> Installer<'a> {
                     args,
                     ok_exit,
                 } => run_installer(name, runtime, &files[download], args, ok_exit, work.path())?,
-                Step::Copy { from, to, files } => {
+                Step::Copy {
+                    from,
+                    to,
+                    files,
+                    native,
+                } => {
                     let source = self.component_dir(name, bottle, from)?;
                     copy_files(
                         name,
                         &source,
                         &self.dirs.bottle_prefix(&bottle.id).join(to.relative_dir()),
                         files,
+                        *native,
                     )?;
                 }
                 Step::Override { dlls, mode } => {
@@ -360,7 +366,40 @@ fn exit_is_ok(status: i32, ok_exit: &[i32]) -> bool {
     ok_exit.iter().any(|ok| ok & 0xff == status)
 }
 
-fn copy_files(verb: &str, from: &Path, to: &Path, patterns: &[String]) -> Result<()> {
+/// `winebuild` writes this right after the DOS header of every DLL it builds
+/// (`builtin_signature` in Wine's `dlls/ntdll/unix/loader.c`).
+const BUILTIN_SIGNATURE: &[u8] = b"Wine builtin DLL";
+/// What a normal PE file has at the same place: the start of the MS-DOS stub
+/// program (`push cs; pop ds; ...; int 21h` + "This program canno").
+const DOS_STUB_HEAD: [u8; 32] =
+    *b"\x0e\x1f\xba\x0e\x00\xb4\x09\xcd\x21\xb8\x01\x4c\xcd\x21This program canno";
+const MARKER_OFFSET: usize = 0x40;
+
+/// Turn a Wine builtin DLL into a native one in place: replace the 32-byte
+/// builtin marker at offset 0x40 with the DOS stub bytes a normal build has.
+///
+/// Wine 11.18 does not load a builtin-marked DLL from the prefix when the
+/// override says `native` (status `c0000135`), and with `native,builtin` it
+/// loads its own builtin instead (checked with `WINEDEBUG=+loaddll`, 15.10.2026).
+/// For DXVK-macOS 1.10.3 the result is byte-for-byte the release's
+/// non-builtin archive (`dxvk-macOS-async-v1.10.3-20230507-repack.tar.gz`,
+/// same SHA-256 for all four DLLs); frankea/Whisky strips the marker the same
+/// way for DXMT. Returns whether the file was changed.
+pub fn make_native(path: &Path) -> Result<bool> {
+    let mut bytes = fs::read(path).map_err(|e| Error::io(path, e))?;
+    let end = MARKER_OFFSET + DOS_STUB_HEAD.len();
+    let is_builtin = bytes.len() >= end
+        && bytes.starts_with(b"MZ")
+        && bytes[MARKER_OFFSET..].starts_with(BUILTIN_SIGNATURE);
+    if !is_builtin {
+        return Ok(false);
+    }
+    bytes[MARKER_OFFSET..end].copy_from_slice(&DOS_STUB_HEAD);
+    fs::write(path, bytes).map_err(|e| Error::io(path, e))?;
+    Ok(true)
+}
+
+fn copy_files(verb: &str, from: &Path, to: &Path, patterns: &[String], native: bool) -> Result<()> {
     fs::create_dir_all(to).map_err(|e| Error::io(to, e))?;
     let mut names: Vec<String> = fs::read_dir(from)
         .map_err(|e| Error::io(from, e))?
@@ -383,7 +422,10 @@ fn copy_files(verb: &str, from: &Path, to: &Path, patterns: &[String]) -> Result
         }
         for name in matches {
             let target = to.join(name);
-            fs::copy(from.join(name), &target).map_err(|e| Error::io(target, e))?;
+            fs::copy(from.join(name), &target).map_err(|e| Error::io(&target, e))?;
+            if native && make_native(&target)? {
+                tracing::debug!(file = %target.display(), "builtin marker replaced");
+            }
         }
     }
     Ok(())
@@ -465,6 +507,13 @@ exit 0
             for dll in dlls {
                 fs::write(d.join(dll), format!("{arch}/{dll}")).unwrap();
             }
+            // A builtin-marked DLL, as in the real DXVK component.
+            let mut marked = b"MZ".to_vec();
+            marked.resize(MARKER_OFFSET, 0);
+            marked.extend_from_slice(BUILTIN_SIGNATURE);
+            marked.resize(MARKER_OFFSET + 32, 0);
+            marked.extend_from_slice(b"t be run in DOS mode.");
+            fs::write(d.join("d3d10core.dll"), marked).unwrap();
             fs::write(d.join("README.txt"), "not a dll").unwrap();
         }
         let installed = InstalledEngine {
@@ -475,6 +524,7 @@ exit 0
             wine_bin: "bin/wine".into(),
             backends: vec![GraphicsBackend::Dxvk],
             components: vec!["dxvk-test".into()],
+            gptk_capable: false,
             source_sha256: "0".repeat(64),
             installed_unix: 0,
         };
@@ -512,6 +562,7 @@ exit 0
                 },
                 backends: vec![],
                 components: vec![],
+                gptk_capable: false,
             }],
             components: vec![Component {
                 id: "dxvk-test".into(),
@@ -725,6 +776,10 @@ data = "1"
             "i386-windows/dxgi.dll"
         );
         assert!(!win.join("system32/README.txt").exists());
+        // The builtin marker was turned into the normal DOS stub.
+        let native = fs::read(win.join("system32/d3d10core.dll")).unwrap();
+        assert_eq!(&native[MARKER_OFFSET..MARKER_OFFSET + 32], &DOS_STUB_HEAD);
+        assert!(native.ends_with(b"This program cannot be run in DOS mode."));
 
         let db = fs::read_to_string(&fx.reg_db).unwrap();
         for dll in ["d3d10core", "d3d11"] {
@@ -737,6 +792,45 @@ data = "1"
             !db.contains("DllOverrides|dxgi|"),
             "dxgi must stay builtin: {db}"
         );
+    }
+
+    #[test]
+    fn make_native_only_touches_builtin_pe_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plain = tmp.path().join("plain.dll");
+        fs::write(&plain, b"MZ not marked").unwrap();
+        assert!(!make_native(&plain).unwrap());
+        assert_eq!(fs::read(&plain).unwrap(), b"MZ not marked");
+    }
+
+    /// Checks the claim in `make_native`'s docs on the real DXVK component and
+    /// Gcenx's non-builtin archive unpacked into CROSS_TEST_DXVK_NATIVE_DIR.
+    #[test]
+    #[ignore = "needs the real DXVK component and the non-builtin DXVK-macOS archive"]
+    fn real_dxvk_builtin_becomes_the_native_release() {
+        use sha2::{Digest, Sha256};
+        let home = std::env::var_os("CROSS_TEST_ENGINES_HOME").expect("CROSS_TEST_ENGINES_HOME");
+        let native = PathBuf::from(
+            std::env::var_os("CROSS_TEST_DXVK_NATIVE_DIR").expect("CROSS_TEST_DXVK_NATIVE_DIR"),
+        );
+        let builtin = PathBuf::from(home).join(
+            "engines/wine-devel-11.18/components/dxvk-macos-1.10.3/\
+             dxvk-macOS-async-v1.10.3-20230507-repack-builtin",
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        for (arch, sub) in [("x86_64-windows", "x64"), ("i386-windows", "x32")] {
+            for dll in ["d3d10core.dll", "d3d11.dll"] {
+                let copy = tmp.path().join(format!("{sub}-{dll}"));
+                fs::copy(builtin.join(arch).join(dll), &copy).unwrap();
+                assert!(make_native(&copy).unwrap());
+                let hash = |p: &Path| Sha256::digest(fs::read(p).unwrap());
+                assert_eq!(
+                    hash(&copy),
+                    hash(&native.join(sub).join(dll)),
+                    "{arch}/{dll}"
+                );
+            }
+        }
     }
 
     #[test]

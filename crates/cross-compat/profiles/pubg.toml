@@ -1,0 +1,23 @@
+# Unverified: written from the source below, never run with cross-app.
+# Settings that need D3DMetal fall back to wined3d until the engine has a
+# D3DMetal overlay; sync modes are skipped on engines without esync/msync.
+
+schema = 1
+id = "pubg"
+name = "PUBG: Battlegrounds"
+steam_appid = 578080
+exe_names = ["TslGame.exe"]
+rating = "red"
+anticheat = "BattlEye"
+known_bugs = [
+    "BattlEye blocks the game under Wine; it is online-only, so there is no workaround.",
+]
+notes = [
+    "Kept as the anti-cheat example of the test matrix.",
+]
+
+[source]
+name = "frankea/Whisky community game database (GameDB.json, entry \"pubg\")"
+url = "https://github.com/frankea/Whisky/blob/main/WhiskyKit/Sources/WhiskyKit/GameDatabase/Resources/GameDB.json"
+reported_rating = "broken"
+reported_on = "Wine 9.7, macOS 15.1, arm64 (2025-11-15 per the source)"

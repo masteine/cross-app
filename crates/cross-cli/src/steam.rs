@@ -20,6 +20,15 @@ pub enum BackendArg {
     D3dmetal,
 }
 
+impl From<BackendArg> for GraphicsBackend {
+    fn from(arg: BackendArg) -> Self {
+        match arg {
+            BackendArg::Dxvk => GraphicsBackend::Dxvk,
+            BackendArg::D3dmetal => GraphicsBackend::D3dMetal,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 pub enum SteamCommand {
     /// Download the pinned SteamSetup.exe and install Steam into a bottle
@@ -126,6 +135,9 @@ pub fn run(command: SteamCommand, dirs: &AppDirs, config: &Config) -> Result<Exi
                 "Launching {appid} via Steam (output: {}).",
                 launched.log.display()
             );
+            for warning in &launched.graphics.warnings {
+                eprintln!("warning: {warning}");
+            }
             if launched.steam_was_running && launched.has_profile {
                 eprintln!(
                     "note: Steam was already running in {bottle}, so this game's settings were not applied; \
@@ -250,13 +262,11 @@ fn profile(
         appid,
         ProfileUpdate {
             name,
-            backend: backend.map(|b| match b {
-                BackendArg::Dxvk => GraphicsBackend::Dxvk,
-                BackendArg::D3dmetal => GraphicsBackend::D3dMetal,
-            }),
+            backend: backend.map(GraphicsBackend::from),
             env: pairs,
             args: (!args.is_empty()).then_some(args),
             clear,
+            ..Default::default()
         },
     )?;
     match updated {

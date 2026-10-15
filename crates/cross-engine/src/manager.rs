@@ -32,6 +32,9 @@ pub struct InstalledEngine {
     /// Ids of components installed under `components/`.
     #[serde(default)]
     pub components: Vec<String>,
+    /// Copied from the catalog: the build can execute D3DMetal.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub gptk_capable: bool,
     /// SHA-256 of the archive this engine was installed from.
     pub source_sha256: String,
     pub installed_unix: u64,
@@ -64,6 +67,11 @@ pub struct EngineManager<'a> {
 impl<'a> EngineManager<'a> {
     pub fn new(dirs: &'a AppDirs) -> Self {
         Self { dirs }
+    }
+
+    /// Directory of an engine (installed or not).
+    pub fn engine_dir(&self, id: &str) -> PathBuf {
+        self.dirs.engine_dir(id)
     }
 
     /// Absolute path of an installed engine's wine executable.
@@ -192,6 +200,7 @@ impl<'a> EngineManager<'a> {
             wine_bin,
             backends: entry.backends.clone(),
             components,
+            gptk_capable: entry.gptk_capable,
             source_sha256: entry.archive.sha256.clone(),
             installed_unix: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -413,6 +422,7 @@ mod tests {
                 archive: archive_at(&engine_base, "engine", &engine_tar),
                 backends: vec![GraphicsBackend::D3dMetal, GraphicsBackend::Dxvk],
                 components: vec!["dxvk".into(), "mvk".into()],
+                gptk_capable: false,
             }],
             components: vec![
                 component("dxvk", ComponentKind::Dxvk, &dxvk_base, &dxvk_tar),

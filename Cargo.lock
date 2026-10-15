@@ -229,12 +229,27 @@ dependencies = [
  "anyhow",
  "clap",
  "cross-bottle",
+ "cross-compat",
  "cross-core",
  "cross-deps",
  "cross-engine",
  "cross-steam",
  "serde",
  "serde_json",
+ "toml",
+ "tracing",
+]
+
+[[package]]
+name = "cross-compat"
+version = "0.0.1"
+dependencies = [
+ "cross-core",
+ "cross-engine",
+ "cross-steam",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.21",
  "toml",
  "tracing",
 ]
@@ -262,6 +277,7 @@ dependencies = [
  "cross-engine",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.21",
  "toml",

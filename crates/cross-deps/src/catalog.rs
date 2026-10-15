@@ -72,6 +72,11 @@ pub enum Step {
         to: Dest,
         /// File names or `*.ext` patterns.
         files: Vec<String>,
+        /// Turn Wine builtin DLLs into native ones while copying (see
+        /// `install::make_native`); Wine refuses to load a builtin-marked DLL
+        /// from the prefix as native.
+        #[serde(default)]
+        native: bool,
     },
     /// Set DLL overrides.
     Override { dlls: Vec<String>, mode: String },

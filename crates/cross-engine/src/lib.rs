@@ -5,8 +5,10 @@
 //! front end (CLI today, GUI later) can render it.
 
 pub mod catalog;
+pub mod d3dmetal;
 pub mod download;
 mod error;
+pub mod features;
 pub mod gptk;
 pub mod manager;
 pub mod rosetta;

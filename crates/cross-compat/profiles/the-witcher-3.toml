@@ -1,0 +1,26 @@
+# Unverified: written from the source below, never run with cross-app.
+# Settings that need D3DMetal fall back to wined3d until the engine has a
+# D3DMetal overlay; sync modes are skipped on engines without esync/msync.
+
+schema = 1
+id = "the-witcher-3"
+name = "The Witcher 3: Wild Hunt"
+steam_appid = 292030
+exe_names = ["witcher3.exe"]
+rating = "yellow"
+backend = "d3dmetal"
+sync = "esync"
+known_bugs = [
+    "Shader compilation stutter in cutscenes and area transitions on the first playthrough.",
+    "Ray tracing options may cause instability; turn them off.",
+    "HDR is not supported; turn it off in the game.",
+]
+notes = [
+    "The next-gen update renders with DirectX 12, which only D3DMetal provides here.",
+]
+
+[source]
+name = "frankea/Whisky community game database (GameDB.json, entry \"the-witcher-3\")"
+url = "https://github.com/frankea/Whisky/blob/main/WhiskyKit/Sources/WhiskyKit/GameDatabase/Resources/GameDB.json"
+reported_rating = "playable"
+reported_on = "Whisky 3.0.0, Wine 10.0, macOS 15.3, arm64 (tested 2026-01-12 per the source)"
