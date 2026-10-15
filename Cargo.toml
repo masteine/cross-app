@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/cross-core", "crates/cross-engine", "crates/cross-bottle", "crates/cross-deps", "crates/cross-steam", "crates/cross-cli"]
+members = ["crates/cross-core", "crates/cross-engine", "crates/cross-bottle", "crates/cross-deps", "crates/cross-steam", "crates/cross-cli", "crates/cross-gui"]
+# The GUI pulls in Tauri (~400 crates); plain `cargo build`/`cargo test` skip it.
+# `--workspace` and `-p cross-gui` include it (see docs/gui.md).
+default-members = ["crates/cross-core", "crates/cross-engine", "crates/cross-bottle", "crates/cross-deps", "crates/cross-steam", "crates/cross-cli"]
 
 [workspace.package]
 version = "0.0.1"

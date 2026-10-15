@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>cross-app</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script type="module" src="js/app.js"></script>
+  </head>
+  <body>
+    <div class="shell">
+      <nav class="sidebar" aria-label="Sections">
+        <div class="brand">cross-app</div>
+        <a href="#/library" data-nav="library">Library</a>
+        <a href="#/bottles" data-nav="bottles">Bottles</a>
+        <a href="#/engines" data-nav="engines">Engines</a>
+        <a href="#/logs" data-nav="logs">Logs</a>
+        <div class="sidebar-foot">
+          <button type="button" class="link" id="open-wizard">First-run setup</button>
+        </div>
+      </nav>
+      <main id="page" tabindex="-1"></main>
+    </div>
+
+    <!-- Running long operations (engine/Steam installs, dependencies). -->
+    <aside id="tasks" aria-live="polite"></aside>
+    <div id="toasts" aria-live="polite"></div>
+
+    <!-- Shown while files are dragged over the window. -->
+    <div id="drop-overlay" hidden>
+      <div class="drop-card">Drop a Windows program (.exe, .msi, .lnk, .bat) to add it to a bottle</div>
+    </div>
+
+    <dialog id="modal"></dialog>
+  </body>
+</html>

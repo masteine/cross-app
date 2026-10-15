@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "The main window: core IPC (invoke, events, window). Dialogs and notifications are shown from Rust, so no plugin permissions are granted to the page.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
