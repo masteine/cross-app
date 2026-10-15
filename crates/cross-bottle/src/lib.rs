@@ -4,6 +4,7 @@
 //! stops their processes, and edits their registry. It drives the Wine binary of
 //! an engine installed by `cross-engine`; it never talks to a UI.
 
+pub mod crossover;
 mod error;
 pub mod exec;
 pub mod launch;

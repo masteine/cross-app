@@ -6,7 +6,7 @@ use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cross_core::config::{BottleStore, Config};
-use cross_core::model::{validate_bottle_id, Bottle, WindowsVersion};
+use cross_core::model::{validate_bottle_id, Bottle, Translation, WindowsVersion};
 use cross_core::paths::AppDirs;
 use cross_engine::manager::EngineManager;
 
@@ -80,6 +80,14 @@ impl<'a> BottleManager<'a> {
         let engine = engines
             .get(&options.engine)?
             .ok_or_else(|| Error::EngineNotInstalled(options.engine.clone()))?;
+        if engine.translation == Translation::External {
+            return Err(Error::InvalidInput(format!(
+                "{} is an external engine: create the bottle in CrossOver, then run \
+                 `cross crossover import <bottle>`",
+                options.engine
+            )));
+        }
+        engines.check_runnable(&engine)?;
 
         fs::create_dir_all(&dir).map_err(|e| Error::io(&dir, e))?;
         let wine = engines.wine_path(&engine);
@@ -126,6 +134,8 @@ impl<'a> BottleManager<'a> {
     }
 
     /// Delete a bottle and everything in it, stopping its processes first.
+    /// For a bottle imported from CrossOver only the link is removed
+    /// (`remove_dir_all` does not follow symlinks).
     pub fn delete(&self, id: &str) -> Result<()> {
         self.get(id)?;
         if let Ok((_, runtime)) = Runtime::open(self.dirs, id) {
@@ -141,6 +151,11 @@ impl<'a> BottleManager<'a> {
     pub fn clone_bottle(&self, source: &str, target: &str, name: Option<&str>) -> Result<Bottle> {
         let mut bottle = self.get(source)?;
         validate_bottle_id(target)?;
+        if crate::crossover::is_linked(self.dirs, source) {
+            return Err(Error::InvalidInput(format!(
+                "bottle {source:?} is linked to a CrossOver bottle; duplicate it in CrossOver instead"
+            )));
+        }
         self.ensure_stopped(source)?;
         let dest = self.dirs.bottle_dir(target);
         if dest.exists() {

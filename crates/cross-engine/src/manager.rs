@@ -8,8 +8,10 @@ use cross_core::model::{Engine, GraphicsBackend, Translation};
 use cross_core::paths::AppDirs;
 use serde::{Deserialize, Serialize};
 
-use crate::catalog::{validate_id, Catalog, EngineEntry};
+use crate::catalog::{validate_id, Catalog, EngineEntry, ExternalKind};
+use crate::crossover::CrossOverApp;
 use crate::download::{extract_archive, fetch_verified};
+use crate::policy::{self, Host};
 use crate::{Error, Progress, Result};
 
 /// File inside each engine directory describing what was installed.
@@ -25,14 +27,15 @@ pub struct InstalledEngine {
     pub wine_version: String,
     #[serde(default)]
     pub translation: Translation,
-    /// Path of the `wine`/`wine64` executable relative to the engine directory.
+    /// Path of the `wine`/`wine64` executable relative to the engine directory;
+    /// absolute for external engines (it points into the other product).
     pub wine_bin: PathBuf,
     #[serde(default)]
     pub backends: Vec<GraphicsBackend>,
     /// Ids of components installed under `components/`.
     #[serde(default)]
     pub components: Vec<String>,
-    /// SHA-256 of the archive this engine was installed from.
+    /// SHA-256 of the archive this engine was installed from; empty for external engines.
     pub source_sha256: String,
     pub installed_unix: u64,
 }
@@ -59,11 +62,41 @@ pub struct InstallOptions {
 
 pub struct EngineManager<'a> {
     dirs: &'a AppDirs,
+    /// Facts about this Mac; detected when first needed unless set.
+    host: Option<Host>,
+    /// Where to look for external apps; the platform defaults unless set.
+    crossover_candidates: Option<Vec<PathBuf>>,
 }
 
 impl<'a> EngineManager<'a> {
     pub fn new(dirs: &'a AppDirs) -> Self {
-        Self { dirs }
+        Self {
+            dirs,
+            host: None,
+            crossover_candidates: None,
+        }
+    }
+
+    /// Use these host facts instead of probing the system.
+    pub fn with_host(mut self, host: Host) -> Self {
+        self.host = Some(host);
+        self
+    }
+
+    /// Look for `CrossOver.app` at these paths instead of the defaults.
+    pub fn with_crossover_candidates(mut self, candidates: Vec<PathBuf>) -> Self {
+        self.crossover_candidates = Some(candidates);
+        self
+    }
+
+    fn host(&self) -> Host {
+        self.host.clone().unwrap_or_else(Host::detect)
+    }
+
+    /// Check that an installed engine can run on this Mac now: Rosetta engines
+    /// need Rosetta, native ones must not, external ones must still be there.
+    pub fn check_runnable(&self, engine: &InstalledEngine) -> Result<()> {
+        policy::check_run(engine, &self.wine_path(engine), &self.host())
     }
 
     /// Absolute path of an installed engine's wine executable.
@@ -108,7 +141,9 @@ impl<'a> EngineManager<'a> {
         Ok(engines)
     }
 
-    /// Download (or reuse the cached download of), verify and unpack an engine.
+    /// Install an engine from the catalog. Downloaded engines (`rosetta`,
+    /// `native`) are fetched, verified and unpacked; `external` engines are
+    /// looked up on the system and only registered.
     ///
     /// Everything is unpacked into a staging directory that is renamed into
     /// place at the end, so a failure never leaves a half-installed engine.
@@ -130,6 +165,10 @@ impl<'a> EngineManager<'a> {
         if self.get(id)?.is_some() {
             return Err(Error::AlreadyInstalled(id.to_owned()));
         }
+        policy::check_install(entry, &self.host())?;
+        if !entry.translation.is_downloaded() {
+            return self.register_external(entry);
+        }
 
         let engines_dir = self.dirs.engines_dir();
         fs::create_dir_all(&engines_dir).map_err(|e| Error::io(&engines_dir, e))?;
@@ -146,7 +185,7 @@ impl<'a> EngineManager<'a> {
                     let _ = fs::remove_dir_all(&staging);
                     return Err(Error::io(target, e));
                 }
-                tracing::info!(%id, "engine installed");
+                tracing::info!(engine = %id, translation = entry.translation.name(), "engine installed");
                 Ok(installed)
             }
             Err(e) => {
@@ -165,11 +204,15 @@ impl<'a> EngineManager<'a> {
         progress: &mut dyn FnMut(Progress<'_>),
     ) -> Result<InstalledEngine> {
         let cache = self.dirs.downloads_dir();
+        let source = entry.archive.as_ref().ok_or_else(|| {
+            Error::InvalidCatalog(format!("{}: downloaded engines need an archive", entry.id))
+        })?;
 
-        let archive = fetch_verified(&entry.archive, &entry.id, &cache, progress)?;
+        let archive = fetch_verified(source, &entry.id, &cache, progress)?;
         progress(Progress::Extracting { label: &entry.id });
         extract_archive(&archive, staging)?;
         let wine_bin = find_wine_binary(staging)?;
+        policy::verify_binary(&entry.id, entry.translation, &staging.join(&wine_bin))?;
 
         let mut components = Vec::new();
         if options.with_dxvk {
@@ -192,13 +235,58 @@ impl<'a> EngineManager<'a> {
             wine_bin,
             backends: entry.backends.clone(),
             components,
-            source_sha256: entry.archive.sha256.clone(),
+            source_sha256: source.sha256.clone(),
             installed_unix: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs()),
         };
         let file = staging.join(ENGINE_FILE);
         fs::write(&file, toml::to_string_pretty(&installed)?).map_err(|e| Error::io(file, e))?;
+        Ok(installed)
+    }
+
+    /// Find an external engine's app on the system and record it under
+    /// `engines/<id>/engine.toml`. Nothing is copied: `wine_bin` points into the app.
+    fn register_external(&self, entry: &EngineEntry) -> Result<InstalledEngine> {
+        let (wine_bin, version) = match entry.external {
+            Some(ExternalKind::Crossover) => {
+                let candidates = self
+                    .crossover_candidates
+                    .clone()
+                    .unwrap_or_else(CrossOverApp::candidates);
+                let app =
+                    CrossOverApp::find(&candidates).ok_or_else(|| Error::ExternalNotFound {
+                        what: crate::crossover::APP_NAME.to_owned(),
+                        searched: candidates.clone(),
+                    })?;
+                tracing::info!(engine = %entry.id, app = %app.app.display(), version = ?app.version, "found CrossOver");
+                (app.wine(), app.version)
+            }
+            None => {
+                return Err(Error::InvalidCatalog(format!(
+                    "{}: external engines must say what to look for in `external`",
+                    entry.id
+                )))
+            }
+        };
+        let installed = InstalledEngine {
+            id: entry.id.clone(),
+            name: entry.name.clone(),
+            wine_version: version.unwrap_or_else(|| "unknown".to_owned()),
+            translation: entry.translation,
+            wine_bin,
+            backends: entry.backends.clone(),
+            components: Vec::new(),
+            source_sha256: String::new(),
+            installed_unix: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs()),
+        };
+        let dir = self.dirs.engine_dir(&entry.id);
+        fs::create_dir_all(&dir).map_err(|e| Error::io(&dir, e))?;
+        let file = dir.join(ENGINE_FILE);
+        fs::write(&file, toml::to_string_pretty(&installed)?).map_err(|e| Error::io(file, e))?;
+        tracing::info!(engine = %entry.id, translation = entry.translation.name(), "engine registered");
         Ok(installed)
     }
 
@@ -284,6 +372,7 @@ impl<'a> EngineManager<'a> {
     }
 
     /// Delete an installed engine. Bottles that reference it are not touched.
+    /// For an external engine only the registration is removed, never the app.
     pub fn remove(&self, id: &str) -> Result<()> {
         validate_id(id)?;
         if self.get(id)?.is_none() {
@@ -291,7 +380,7 @@ impl<'a> EngineManager<'a> {
         }
         let dir = self.dirs.engine_dir(id);
         fs::remove_dir_all(&dir).map_err(|e| Error::io(dir, e))?;
-        tracing::info!(%id, "engine removed");
+        tracing::info!(engine = %id, "engine removed");
         Ok(())
     }
 }
@@ -341,11 +430,23 @@ mod tests {
     use std::process::Command;
 
     use super::*;
+    use cross_core::system::MacVersion;
+
     use crate::catalog::{Archive, Component, ComponentKind};
+    use crate::crossover::test_support::fake_app;
     use crate::download::test_support::{serve, sha256_hex};
+    use crate::macho::test_support::{thin_header, ARM64, X86_64};
 
     /// Build a tar.gz holding `files` (relative path, contents).
     fn make_tar_gz(dir: &Path, name: &str, files: &[(&str, &str)]) -> Vec<u8> {
+        let bytes: Vec<(&str, Vec<u8>)> = files
+            .iter()
+            .map(|(p, c)| (*p, c.as_bytes().to_vec()))
+            .collect();
+        make_tar_gz_bytes(dir, name, &bytes)
+    }
+
+    fn make_tar_gz_bytes(dir: &Path, name: &str, files: &[(&str, Vec<u8>)]) -> Vec<u8> {
         let src = dir.join(format!("{name}-src"));
         for (path, contents) in files {
             let full = src.join(path);
@@ -410,7 +511,9 @@ mod tests {
                 name: "Wine Test".into(),
                 wine_version: "1.0".into(),
                 translation: Translation::Rosetta,
-                archive: archive_at(&engine_base, "engine", &engine_tar),
+                archive: Some(archive_at(&engine_base, "engine", &engine_tar)),
+                external: None,
+                min_macos: None,
                 backends: vec![GraphicsBackend::D3dMetal, GraphicsBackend::Dxvk],
                 components: vec!["dxvk".into(), "mvk".into()],
             }],
@@ -576,7 +679,7 @@ mod tests {
     #[test]
     fn failed_install_leaves_no_trace() {
         let mut fx = fixture(1);
-        fx.catalog.engines[0].archive.sha256 = "0".repeat(64);
+        fx.catalog.engines[0].archive.as_mut().unwrap().sha256 = "0".repeat(64);
         let manager = EngineManager::new(&fx.dirs);
         let err = manager
             .install(
@@ -601,7 +704,7 @@ mod tests {
         let body = make_tar_gz(tmp.path(), "empty", &[("readme.txt", "no wine here")]);
         let base = serve(body.clone(), 1);
         let mut catalog = fx.catalog.clone();
-        catalog.engines[0].archive = archive_at(&base, "empty", &body);
+        catalog.engines[0].archive = Some(archive_at(&base, "empty", &body));
 
         let manager = EngineManager::new(&fx.dirs);
         let err = manager
@@ -655,5 +758,169 @@ mod tests {
             find_wine_binary(tmp.path()).unwrap(),
             Path::new("a/bin/wine64")
         );
+    }
+
+    fn arm_host() -> Host {
+        Host {
+            arch: "aarch64".into(),
+            macos: Some(MacVersion::new(26, 5, 0)),
+            rosetta_installed: false,
+        }
+    }
+
+    /// A catalog with one native engine whose `wine` is a Mach-O header of `cputype`.
+    fn native_catalog(tmp: &Path, cputype: u32) -> Catalog {
+        let body = make_tar_gz_bytes(
+            tmp,
+            "native",
+            &[("wine-arm64/bin/wine", thin_header(cputype))],
+        );
+        let base = serve(body.clone(), 1);
+        Catalog {
+            schema: 1,
+            engines: vec![EngineEntry {
+                id: "wine-native-1".into(),
+                name: "Native".into(),
+                wine_version: "1.0".into(),
+                translation: Translation::Native,
+                archive: Some(archive_at(&base, "native", &body)),
+                external: None,
+                min_macos: Some("26.5".into()),
+                backends: vec![],
+                components: vec![],
+            }],
+            components: vec![],
+        }
+    }
+
+    #[test]
+    fn native_engine_installs_and_runs_without_rosetta() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = AppDirs::with_root(tmp.path().join("home"));
+        let catalog = native_catalog(tmp.path(), ARM64);
+        let manager = EngineManager::new(&dirs).with_host(arm_host());
+        let installed = manager
+            .install(
+                &catalog,
+                "wine-native-1",
+                InstallOptions::default(),
+                &mut |_| {},
+            )
+            .unwrap();
+        assert_eq!(installed.translation, Translation::Native);
+        assert!(!installed.engine().requires_rosetta());
+        // arm_host() has no Rosetta: a native engine must still be runnable.
+        manager.check_runnable(&installed).unwrap();
+    }
+
+    #[test]
+    fn native_engine_with_an_x86_64_wine_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = AppDirs::with_root(tmp.path().join("home"));
+        let catalog = native_catalog(tmp.path(), X86_64);
+        let manager = EngineManager::new(&dirs).with_host(arm_host());
+        let err = manager
+            .install(
+                &catalog,
+                "wine-native-1",
+                InstallOptions::default(),
+                &mut |_| {},
+            )
+            .unwrap_err();
+        assert!(matches!(err, Error::NotNative { .. }), "{err}");
+        assert!(manager.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn native_engine_respects_min_macos_before_downloading() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = AppDirs::with_root(tmp.path().join("home"));
+        // The archive server accepts no connection: the check must come first.
+        let mut catalog = native_catalog(tmp.path(), ARM64);
+        catalog.engines[0].min_macos = Some("27.0".into());
+        let err = EngineManager::new(&dirs)
+            .with_host(arm_host())
+            .install(
+                &catalog,
+                "wine-native-1",
+                InstallOptions::default(),
+                &mut |_| {},
+            )
+            .unwrap_err();
+        assert!(matches!(err, Error::Unsupported { .. }), "{err}");
+    }
+
+    #[test]
+    fn crossover_is_found_and_registered_not_downloaded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = AppDirs::with_root(tmp.path().join("home"));
+        let app = fake_app(&tmp.path().join("Applications"), "27.0");
+        let manager = EngineManager::new(&dirs)
+            .with_host(arm_host())
+            .with_crossover_candidates(vec![tmp.path().join("nope.app"), app.app.clone()]);
+        let mut steps = 0;
+        let installed = manager
+            .install(
+                &Catalog::builtin(),
+                "crossover",
+                InstallOptions::default(),
+                &mut |_| steps += 1,
+            )
+            .unwrap();
+        assert_eq!(steps, 0, "nothing is downloaded");
+        assert_eq!(installed.translation, Translation::External);
+        assert_eq!(installed.wine_version, "27.0");
+        assert_eq!(manager.wine_path(&installed), app.wine());
+        assert_eq!(manager.get("crossover").unwrap(), Some(installed.clone()));
+        manager.check_runnable(&installed).unwrap();
+
+        // Removing the registration never touches the app.
+        manager.remove("crossover").unwrap();
+        assert!(app.wine().is_file());
+        assert!(manager.get("crossover").unwrap().is_none());
+    }
+
+    #[test]
+    fn missing_crossover_is_reported_with_the_searched_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = AppDirs::with_root(tmp.path().join("home"));
+        let where_ = tmp.path().join("Applications/CrossOver.app");
+        let err = EngineManager::new(&dirs)
+            .with_host(arm_host())
+            .with_crossover_candidates(vec![where_.clone()])
+            .install(
+                &Catalog::builtin(),
+                "crossover",
+                InstallOptions::default(),
+                &mut |_| {},
+            )
+            .unwrap_err();
+        assert!(matches!(err, Error::ExternalNotFound { .. }), "{err}");
+        assert!(
+            err.to_string().contains(&where_.display().to_string()),
+            "{err}"
+        );
+        assert!(!dirs.engine_dir("crossover").exists());
+    }
+
+    #[test]
+    fn uninstalled_crossover_makes_the_engine_unrunnable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = AppDirs::with_root(tmp.path().join("home"));
+        let app = fake_app(tmp.path(), "27.0");
+        let manager = EngineManager::new(&dirs)
+            .with_host(arm_host())
+            .with_crossover_candidates(vec![app.app.clone()]);
+        let installed = manager
+            .install(
+                &Catalog::builtin(),
+                "crossover",
+                InstallOptions::default(),
+                &mut |_| {},
+            )
+            .unwrap();
+        fs::remove_dir_all(&app.app).unwrap();
+        let err = manager.check_runnable(&installed).unwrap_err();
+        assert!(matches!(err, Error::ExternalMissing { .. }), "{err}");
     }
 }

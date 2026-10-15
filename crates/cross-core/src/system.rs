@@ -17,6 +17,13 @@ pub fn rosetta_installed() -> bool {
     Path::new(ROSETTA_RUNTIME).exists()
 }
 
+/// The running macOS version (`sw_vers -productVersion`), if it can be read.
+pub fn macos_version() -> Option<MacVersion> {
+    command_output("sw_vers", &["-productVersion"])
+        .as_deref()
+        .and_then(MacVersion::parse)
+}
+
 /// An Apple Silicon chip such as "Apple M1 Pro".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AppleChip {
@@ -136,9 +143,7 @@ impl SystemInfo {
             arch: std::env::consts::ARCH.to_owned(),
             chip: cpu_brand.as_deref().and_then(AppleChip::parse),
             cpu_brand,
-            macos: command_output("sw_vers", &["-productVersion"])
-                .as_deref()
-                .and_then(MacVersion::parse),
+            macos: macos_version(),
             rosetta_installed: rosetta_installed(),
             xcode_clt: command_output("xcode-select", &["-p"]).map(PathBuf::from),
             gptk: GptkInfo::probe(gptk_dir),

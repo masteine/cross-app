@@ -26,6 +26,12 @@
       },
       "backends": ["d3dmetal", "dxvk"],
       "components": ["dxvk-macos-1.10.3", "moltenvk-1.4.2"]
+    },
+    {
+      "id": "crossover",
+      "name": "CrossOver (installed by the user; its own graphics settings apply)",
+      "translation": "external",
+      "external": "crossover"
     }
   ],
   "components": [

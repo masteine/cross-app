@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use cross_core::config::BottleStore;
-use cross_core::model::Bottle;
+use cross_core::model::{Bottle, Translation};
 use cross_core::paths::AppDirs;
+use cross_engine::crossover;
 use cross_engine::manager::EngineManager;
 
 use crate::{Error, Result};
@@ -18,10 +19,13 @@ pub struct Runtime {
     prefix: PathBuf,
     wine: PathBuf,
     wineserver: PathBuf,
+    /// Extra environment for every command (CrossOver's `CX_*` variables).
+    extra_env: Vec<(&'static str, OsString)>,
 }
 
 impl Runtime {
-    /// Load a bottle and the engine it uses.
+    /// Load a bottle and the engine it uses, checking that the engine can run
+    /// here (Rosetta engines need Rosetta, external apps must still exist).
     pub fn open(dirs: &AppDirs, bottle_id: &str) -> Result<(Bottle, Runtime)> {
         let bottle = BottleStore::new(dirs)
             .load(bottle_id)
@@ -43,8 +47,42 @@ impl Runtime {
         let engine = engines
             .get(&engine_id)?
             .ok_or(Error::EngineNotInstalled(engine_id))?;
-        let runtime = Runtime::new(dirs, bottle_id, &engines.wine_path(&engine));
+        engines.check_runnable(&engine)?;
+        let mut runtime = Runtime::new(dirs, bottle_id, &engines.wine_path(&engine));
+        if engine.translation == Translation::External {
+            runtime.use_crossover_bottle()?;
+        }
         Ok((bottle, runtime))
+    }
+
+    /// Drive the prefix through CrossOver's `wine`: point it at the real bottle
+    /// (imported bottles link `prefix` to it) and set the variables CrossOver
+    /// documents for its "Wine context": `CX_ROOT`, `CX_BOTTLE`, `WINEPREFIX`,
+    /// plus `CX_BOTTLE_PATH` so bottles outside the default directory are found.
+    fn use_crossover_bottle(&mut self) -> Result<()> {
+        let cx_root = crossover::cx_root_of(&self.wine).ok_or_else(|| {
+            Error::InvalidInput(format!(
+                "{} is not CrossOver's bin/wine; re-register the engine",
+                self.wine.display()
+            ))
+        })?;
+        let real = self
+            .prefix
+            .canonicalize()
+            .map_err(|e| Error::io(&self.prefix, e))?;
+        let (Some(name), Some(parent)) = (real.file_name(), real.parent()) else {
+            return Err(Error::InvalidInput(format!(
+                "{} is not a CrossOver bottle",
+                real.display()
+            )));
+        };
+        self.extra_env = vec![
+            ("CX_ROOT", cx_root.into_os_string()),
+            ("CX_BOTTLE", name.to_owned()),
+            ("CX_BOTTLE_PATH", parent.as_os_str().to_owned()),
+        ];
+        self.prefix = real;
+        Ok(())
     }
 
     /// Bind a bottle to an explicit `wine` executable.
@@ -54,6 +92,7 @@ impl Runtime {
             prefix: dirs.bottle_prefix(bottle_id),
             wine: wine.to_owned(),
             wineserver: wine.with_file_name("wineserver"),
+            extra_env: Vec::new(),
         }
     }
 
@@ -105,6 +144,7 @@ impl Runtime {
         // Wine is chatty; keep its debug channels off unless the user turned them on.
         let debug: OsString = std::env::var_os("WINEDEBUG").unwrap_or_else(|| "-all".into());
         cmd.env("WINEDEBUG", debug);
+        cmd.envs(self.extra_env.iter().map(|(k, v)| (k, v)));
         cmd
     }
 }
