@@ -1,10 +1,15 @@
 //! Running programs (`.exe`, `.msi`, `.lnk`, `.bat`) and Wine's built-in tools inside a bottle.
 
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
+use std::time::SystemTime;
 
+use cross_core::logging::{timestamp_compact, timestamp_utc};
 use cross_core::model::LaunchProfile;
 
+use crate::exec::redact;
 use crate::runtime::Runtime;
 use crate::{Error, Result};
 
@@ -136,18 +141,152 @@ pub fn build_command(runtime: &Runtime, request: &LaunchRequest) -> Result<Comma
     Ok(cmd)
 }
 
-/// Run a program in the foreground with inherited stdio and return its exit status.
+/// Run logs kept per bottle (`logs/run-*.log`); older ones are deleted.
+pub const MAX_RUN_LOGS: usize = 20;
+const RUN_LOG_PREFIX: &str = "run-";
+
+/// How a foreground run treats Wine's output.
+#[derive(Debug, Clone, Default)]
+pub struct RunOptions {
+    /// Leave stderr on the terminal instead of writing it to a run log.
+    pub no_capture: bool,
+    /// `WINEDEBUG` channels for this run, e.g. `+err,+module` (default: `-all`).
+    pub wine_debug: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct RunOutcome {
+    pub status: ExitStatus,
+    /// The run log holding Wine's stderr, unless capture was off.
+    pub log: Option<PathBuf>,
+}
+
+/// Run a program in the foreground and return its exit status. Its stdout stays
+/// on the terminal; Wine's stderr goes to a run log in the bottle's `logs/`.
 pub fn run(runtime: &Runtime, request: &LaunchRequest) -> Result<ExitStatus> {
-    run_command(build_command(runtime, request)?)
+    Ok(run_with(runtime, request, &RunOptions::default())?.status)
+}
+
+/// [`run`] with explicit options.
+///
+/// stderr is redirected to a file rather than piped through us: Wine hands it
+/// to the wineserver and to every program it starts, which can outlive this
+/// process, and writing to a pipe nobody reads would kill them with SIGPIPE.
+pub fn run_with(
+    runtime: &Runtime,
+    request: &LaunchRequest,
+    options: &RunOptions,
+) -> Result<RunOutcome> {
+    let mut cmd = build_command(runtime, request)?;
+    if let Some(channels) = &options.wine_debug {
+        cmd.env("WINEDEBUG", channels);
+    }
+    if options.no_capture {
+        return Ok(RunOutcome {
+            status: run_command(cmd)?,
+            log: None,
+        });
+    }
+
+    let logs = logs_dir(runtime);
+    fs::create_dir_all(&logs).map_err(|e| Error::io(&logs, e))?;
+    let started = SystemTime::now();
+    let path = unique_log_path(&logs, &timestamp_compact(started));
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| Error::io(&path, e))?;
+    let env = cmd
+        .get_envs()
+        .map(|(k, v)| {
+            let value = v.map(|v| v.to_string_lossy()).unwrap_or_default();
+            format!("{}={value}", k.to_string_lossy())
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let header = format!(
+        "# cross-app run log\n# started: {}\n# bottle: {}\n# program: {:?} {}\n# env: {}\n\n",
+        timestamp_utc(started),
+        runtime.bottle_id(),
+        cmd.get_program(),
+        redact(&format!("{:?}", cmd.get_args().collect::<Vec<_>>())),
+        redact(&env),
+    );
+    file.write_all(header.as_bytes())
+        .map_err(|e| Error::io(&path, e))?;
+    let child_stderr = file.try_clone().map_err(|e| Error::io(&path, e))?;
+    cmd.stderr(child_stderr);
+    tracing::info!(log = %path.display(), "capturing Wine output");
+
+    let status = run_command(cmd)?;
+    let elapsed = started.elapsed().map_or(0, |d| d.as_secs());
+    let footer = format!("\n# exited: {status} after {elapsed} s\n");
+    file.write_all(footer.as_bytes())
+        .map_err(|e| Error::io(&path, e))?;
+    prune_run_logs(&logs, MAX_RUN_LOGS);
+    Ok(RunOutcome {
+        status,
+        log: Some(path),
+    })
+}
+
+/// `<bottle>/logs`, next to the prefix.
+pub fn logs_dir(runtime: &Runtime) -> PathBuf {
+    runtime
+        .prefix()
+        .parent()
+        .unwrap_or_else(|| runtime.prefix())
+        .join("logs")
+}
+
+fn unique_log_path(dir: &Path, stamp: &str) -> PathBuf {
+    let first = dir.join(format!("{RUN_LOG_PREFIX}{stamp}.log"));
+    if !first.exists() {
+        return first;
+    }
+    (2..)
+        .map(|n| dir.join(format!("{RUN_LOG_PREFIX}{stamp}-{n}.log")))
+        .find(|p| !p.exists())
+        .unwrap_or(first)
+}
+
+/// Run logs in `dir`, oldest first (names sort by time).
+pub fn run_logs(dir: &Path) -> Vec<PathBuf> {
+    let mut logs: Vec<PathBuf> = fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with(RUN_LOG_PREFIX) && n.ends_with(".log"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    logs.sort();
+    logs
+}
+
+fn prune_run_logs(dir: &Path, keep: usize) {
+    let logs = run_logs(dir);
+    for old in logs.iter().take(logs.len().saturating_sub(keep)) {
+        if let Err(e) = fs::remove_file(old) {
+            tracing::warn!(path = %old.display(), error = %e, "could not delete old run log");
+        }
+    }
 }
 
 fn run_command(mut cmd: Command) -> Result<ExitStatus> {
-    tracing::info!(?cmd, "launching");
+    tracing::info!(cmd = %redact(&format!("{cmd:?}")), "launching");
+    let started = std::time::Instant::now();
     let status = cmd.status().map_err(|e| Error::Wine {
         what: "launch".into(),
         message: format!("could not start {:?}: {e}", cmd.get_program()),
     })?;
-    tracing::info!(%status, "program exited");
+    tracing::info!(%status, elapsed_ms = started.elapsed().as_millis() as u64, "program exited");
     Ok(status)
 }
 
@@ -361,6 +500,135 @@ mod tests {
         .unwrap();
         assert!(status.success());
         assert!(fake.calls().contains(&format!("ARGS:{}", exe.display())));
+    }
+
+    /// A wine that prints to both streams and exits with the code in $CODE.
+    fn chatty_wine(tmp: &Path) -> Runtime {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = tmp.join("chatty/bin");
+        fs::create_dir_all(&bin).unwrap();
+        let wine = bin.join("wine");
+        fs::write(
+            &wine,
+            "#!/bin/sh\necho \"to stdout\"\necho \"err: $WINEDEBUG $*\" >&2\nexit ${CODE:-0}\n",
+        )
+        .unwrap();
+        fs::set_permissions(&wine, fs::Permissions::from_mode(0o755)).unwrap();
+        let dirs = AppDirs::with_root(tmp.join("home"));
+        fs::create_dir_all(dirs.bottle_prefix("demo")).unwrap();
+        Runtime::new(&dirs, "demo", &wine)
+    }
+
+    #[test]
+    fn run_captures_stderr_into_a_run_log() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rt = chatty_wine(tmp.path());
+        let req = LaunchRequest {
+            target: "notepad".into(),
+            ..Default::default()
+        };
+        let out = run_with(
+            &rt,
+            &req,
+            &RunOptions {
+                wine_debug: Some("+err".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(out.status.success());
+
+        let log = out.log.unwrap();
+        assert_eq!(log.parent().unwrap(), logs_dir(&rt));
+        let text = fs::read_to_string(&log).unwrap();
+        assert!(text.contains("# bottle: demo"), "{text}");
+        assert!(text.contains("err: +err notepad"), "{text}");
+        assert!(text.contains("# exited: exit status: 0"), "{text}");
+        assert!(
+            !text.contains("to stdout"),
+            "stdout stays on the terminal: {text}"
+        );
+    }
+
+    #[test]
+    fn run_log_masks_secret_looking_variables() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rt = chatty_wine(tmp.path());
+        let mut profile = LaunchProfile::default();
+        profile.env.insert("STEAM_API_KEY".into(), "s3cr3t".into());
+        profile.env.insert("DXVK_HUD".into(), "fps".into());
+        let req = LaunchRequest {
+            target: "notepad".into(),
+            profile,
+            ..Default::default()
+        };
+        let log = run_with(&rt, &req, &RunOptions::default())
+            .unwrap()
+            .log
+            .unwrap();
+        let text = fs::read_to_string(log).unwrap();
+        assert!(!text.contains("s3cr3t"), "{text}");
+        assert!(text.contains("STEAM_API_KEY=<redacted>"), "{text}");
+        assert!(text.contains("DXVK_HUD=fps"), "{text}");
+    }
+
+    #[test]
+    fn run_without_capture_writes_no_log() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rt = chatty_wine(tmp.path());
+        let req = LaunchRequest {
+            target: "notepad".into(),
+            ..Default::default()
+        };
+        let out = run_with(
+            &rt,
+            &req,
+            &RunOptions {
+                no_capture: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(out.log.is_none());
+        assert!(run_logs(&logs_dir(&rt)).is_empty());
+    }
+
+    #[test]
+    fn old_run_logs_are_pruned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rt = chatty_wine(tmp.path());
+        let logs = logs_dir(&rt);
+        fs::create_dir_all(&logs).unwrap();
+        for i in 0..MAX_RUN_LOGS + 5 {
+            fs::write(logs.join(format!("run-20200101-0000{i:02}.log")), "").unwrap();
+        }
+        fs::write(logs.join("cross.log.2026-10-14"), "keep").unwrap();
+        let req = LaunchRequest {
+            target: "notepad".into(),
+            ..Default::default()
+        };
+        run_with(&rt, &req, &RunOptions::default()).unwrap();
+
+        let remaining = run_logs(&logs);
+        assert_eq!(remaining.len(), MAX_RUN_LOGS);
+        assert!(
+            !logs.join("run-20200101-000000.log").exists(),
+            "oldest goes first"
+        );
+        assert!(
+            logs.join("cross.log.2026-10-14").exists(),
+            "other logs are untouched"
+        );
+    }
+
+    #[test]
+    fn same_second_runs_get_distinct_logs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = unique_log_path(tmp.path(), "20261014-120000");
+        fs::write(&first, "").unwrap();
+        let second = unique_log_path(tmp.path(), "20261014-120000");
+        assert_ne!(first, second);
+        assert!(second.to_string_lossy().ends_with("-2.log"));
     }
 
     #[test]

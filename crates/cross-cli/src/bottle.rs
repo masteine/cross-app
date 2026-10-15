@@ -375,6 +375,7 @@ pub struct RunArgs {
     pub env: Vec<String>,
     pub dll_override: Vec<String>,
     pub flags: Flags,
+    pub options: launch::RunOptions,
     pub args: Vec<String>,
 }
 
@@ -401,7 +402,7 @@ pub fn run_program(args: RunArgs, dirs: &AppDirs) -> Result<ExitCode> {
             .insert(dll.to_owned(), mode.to_owned());
     }
 
-    let status = launch::run(
+    let outcome = launch::run_with(
         &runtime,
         &LaunchRequest {
             target: args.target,
@@ -410,8 +411,16 @@ pub fn run_program(args: RunArgs, dirs: &AppDirs) -> Result<ExitCode> {
             profile,
             flags: args.flags,
         },
+        &args.options,
     )?;
-    Ok(exit_code(status))
+    if let (false, Some(log)) = (outcome.status.success(), &outcome.log) {
+        eprintln!(
+            "Program exited with {}; Wine output: {}",
+            outcome.status,
+            log.display()
+        );
+    }
+    Ok(exit_code(outcome.status))
 }
 
 fn exit_code(status: std::process::ExitStatus) -> ExitCode {

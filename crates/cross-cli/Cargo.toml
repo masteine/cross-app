@@ -20,6 +20,7 @@ cross-engine = { path = "../cross-engine" }
 cross-steam = { path = "../cross-steam" }
 serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 toml.workspace = true
 tracing.workspace = true
 

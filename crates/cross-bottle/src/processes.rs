@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use crate::exec::{run_captured, run_checked};
+use crate::exec::{run_captured, run_captured_with, OutputLogging};
 use crate::runtime::Runtime;
 use crate::Result;
 
@@ -112,7 +112,14 @@ pub fn parse_tasklist(output: &str) -> Vec<WinProcess> {
 fn ps_output() -> Result<String> {
     let mut cmd = Command::new("ps");
     cmd.args(["-axwwE", "-o", "pid=,ppid=,etime=,command="]);
-    let out = run_checked(cmd, "ps", Duration::from_secs(15))?;
+    // `-E` prints the environment of every process of this user: never log it.
+    let out = run_captured_with(cmd, "ps", Duration::from_secs(15), OutputLogging::Omit)?;
+    if !out.status.success() {
+        return Err(crate::Error::Wine {
+            what: "ps".into(),
+            message: out.message(),
+        });
+    }
     Ok(out.stdout)
 }
 

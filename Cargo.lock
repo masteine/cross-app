@@ -235,6 +235,7 @@ dependencies = [
  "cross-steam",
  "serde",
  "serde_json",
+ "tempfile",
  "toml",
  "tracing",
 ]

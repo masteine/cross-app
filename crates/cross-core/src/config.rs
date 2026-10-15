@@ -18,7 +18,8 @@ pub struct Config {
     /// Where imported GPTK libraries live, when not the default location.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gptk_dir: Option<PathBuf>,
-    /// Default `tracing` filter, overridden by `RUST_LOG`.
+    /// Detail kept in log files (`debug` by default; the terminal is controlled by
+    /// `-v`/`-q`). Overridden by `RUST_LOG`.
     #[serde(default = "default_log_level")]
     pub log_level: String,
     /// Where `cross steam patches --update` fetches `steam-patches.toml` from.
@@ -27,7 +28,7 @@ pub struct Config {
 }
 
 fn default_log_level() -> String {
-    "info".to_owned()
+    "debug".to_owned()
 }
 
 impl Default for Config {
