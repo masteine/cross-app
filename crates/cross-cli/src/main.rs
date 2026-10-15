@@ -1,6 +1,7 @@
 //! The `cross` command-line interface.
 
 mod bottle;
+mod compat;
 mod crash;
 mod deps;
 mod diag;
@@ -103,6 +104,11 @@ enum Command {
     Logs(logs::LogsArgs),
     /// Collect logs, settings and system info into an archive for bug reports
     Diag(diag::DiagArgs),
+    /// Game compatibility profiles: search, show, apply, sync
+    Compat {
+        #[command(subcommand)]
+        command: compat::CompatCommand,
+    },
     /// Local crash reports (never uploaded): list, show, clear
     Crash {
         #[command(subcommand)]
@@ -122,6 +128,7 @@ impl Command {
             Command::Steam { .. } => "steam",
             Command::Logs(_) => "logs",
             Command::Diag(_) => "diag",
+            Command::Compat { .. } => "compat",
             Command::Crash { .. } => "crash",
         }
     }
@@ -145,6 +152,7 @@ fn log_bottle(command: &Command) -> Option<&str> {
         Command::Run { bottle, .. } => Some(bottle),
         Command::Deps { command } => deps::log_bottle(command),
         Command::Steam { command } => steam::log_bottle(command),
+        Command::Compat { command } => compat::log_bottle(command),
         Command::Logs(args) => args.bottle.as_deref(),
         Command::Doctor { .. }
         | Command::Engine { .. }
@@ -242,6 +250,7 @@ fn dispatch(command: Command, dirs: &AppDirs, config: &Config) -> Result<ExitCod
         Command::Steam { command } => steam::run(command, dirs, config),
         Command::Logs(args) => logs::run(&args, dirs),
         Command::Diag(args) => diag::run(&args, dirs, config),
+        Command::Compat { command } => compat::run(command, dirs),
         Command::Crash { command } => crash::run(command, dirs),
         Command::Run {
             bottle,

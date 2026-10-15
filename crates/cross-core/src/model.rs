@@ -31,6 +31,60 @@ pub enum GraphicsBackend {
     Dxvk,
 }
 
+/// Which Wine synchronization primitive to ask for. Only engines built with the
+/// esync/msync patches read the variables (see `cross_engine::features`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SyncMode {
+    /// Neither variable is set.
+    None,
+    /// `WINEESYNC=1`
+    Esync,
+    /// `WINEMSYNC=1` (mach-semaphore sync on macOS)
+    Msync,
+}
+
+/// Graphics and performance switches, stored per bottle (`[graphics]` in
+/// `bottle.toml`) and per program (`LaunchProfile::graphics`). `None` means
+/// "inherit": a program's value wins over the bottle's, which wins over the
+/// built-in default (off).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct GraphicsSettings {
+    /// Apple's Metal performance HUD (`MTL_HUD_ENABLED=1`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metal_hud: Option<bool>,
+    /// Per-frame Metal HUD statistics written to the console once per second
+    /// (`MTL_HUD_LOG_ENABLED=1`, requires the HUD); used for FPS logs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metal_hud_log: Option<bool>,
+    /// DXVK HUD spec, e.g. `fps,frametimes` (`DXVK_HUD`); empty = off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dxvk_hud: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync: Option<SyncMode>,
+    /// Number of CPUs reported to Windows programs, for old games that break on
+    /// many cores. Only engines that read `WINENCPU` honour it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_count: Option<u32>,
+}
+
+impl GraphicsSettings {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// `self` with every unset field taken from `base`.
+    pub fn or(&self, base: &GraphicsSettings) -> GraphicsSettings {
+        GraphicsSettings {
+            metal_hud: self.metal_hud.or(base.metal_hud),
+            metal_hud_log: self.metal_hud_log.or(base.metal_hud_log),
+            dxvk_hud: self.dxvk_hud.clone().or_else(|| base.dxvk_hud.clone()),
+            sync: self.sync.or(base.sync),
+            cpu_count: self.cpu_count.or(base.cpu_count),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum WindowsVersion {
@@ -83,6 +137,9 @@ pub struct LaunchProfile {
     /// DLL name -> mode (`n`, `b`, `n,b`, `d` ...).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dll_overrides: BTreeMap<String, String>,
+    /// Overrides the bottle's graphics settings for this program.
+    #[serde(default, skip_serializing_if = "GraphicsSettings::is_empty")]
+    pub graphics: GraphicsSettings,
 }
 
 impl LaunchProfile {
@@ -166,6 +223,9 @@ pub struct Bottle {
     pub windows_version: WindowsVersion,
     #[serde(default)]
     pub backend: GraphicsBackend,
+    /// Bottle-wide graphics and performance switches (`[graphics]`).
+    #[serde(default, skip_serializing_if = "GraphicsSettings::is_empty")]
+    pub graphics: GraphicsSettings,
     /// Creation time, seconds since the Unix epoch.
     #[serde(default)]
     pub created_unix: u64,
@@ -188,6 +248,7 @@ impl Bottle {
             engine: None,
             windows_version: WindowsVersion::default(),
             backend: GraphicsBackend::default(),
+            graphics: GraphicsSettings::default(),
             created_unix: 0,
             apps: Vec::new(),
             deps: BTreeMap::new(),
@@ -249,6 +310,37 @@ mod tests {
         assert_eq!(WindowsVersion::Win11.wine_name(), "win11");
         assert_eq!(WindowsVersion::Win7.wine_name(), "win7");
         assert_eq!(WindowsVersion::default(), WindowsVersion::Win11);
+    }
+
+    #[test]
+    fn graphics_settings_layer_and_round_trip() {
+        let bottle = GraphicsSettings {
+            metal_hud: Some(true),
+            sync: Some(SyncMode::Msync),
+            dxvk_hud: Some("fps".into()),
+            ..Default::default()
+        };
+        let game = GraphicsSettings {
+            metal_hud: Some(false),
+            cpu_count: Some(4),
+            ..Default::default()
+        };
+        let merged = game.or(&bottle);
+        assert_eq!(merged.metal_hud, Some(false));
+        assert_eq!(merged.sync, Some(SyncMode::Msync));
+        assert_eq!(merged.dxvk_hud.as_deref(), Some("fps"));
+        assert_eq!(merged.cpu_count, Some(4));
+        assert!(GraphicsSettings::default().is_empty());
+
+        let mut b = Bottle::new("g", "G").unwrap();
+        b.graphics = bottle;
+        let text = toml::to_string(&b).unwrap();
+        assert!(text.contains("[graphics]"), "{text}");
+        assert!(text.contains("sync = \"msync\""), "{text}");
+        assert_eq!(toml::from_str::<Bottle>(&text).unwrap(), b);
+        // Old bottle.toml files without the section still load.
+        let old: Bottle = toml::from_str("id = \"x\"\nname = \"X\"\n").unwrap();
+        assert!(old.graphics.is_empty());
     }
 
     #[test]

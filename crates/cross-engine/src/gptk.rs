@@ -5,6 +5,16 @@
 //! We mount it read-only, copy `lib/external/` into our own data directory and
 //! record the version. Accepting Apple's license stays the user's job: if the
 //! image shows one, mount it once in Finder and import from the mounted volume.
+//!
+//! Besides `lib/external/` (D3DMetal.framework + `libd3dshared.dylib`) the
+//! toolkit's `lib/wine/x86_64-windows/` holds Apple's PE forwarders
+//! (`d3d10.dll`, `d3d11.dll`, `d3d12.dll`, `dxgi.dll`, ...). They are copied too,
+//! and the unix-side names (`d3d11.so` ...) are recreated as symlinks to
+//! `../../external/libd3dshared.dylib`, which is how Apple's payload is laid out.
+//! Sources for that layout: frankea/Whisky `WhiskyKit/.../GPTKImporter.swift`
+//! (`forwarderDLLNames`, `unixLibraryNames`, `unixLinkDestination`) and the
+//! deployment report in https://github.com/frankea/Whisky/issues/163.
+//! Deploying it into an engine is [`crate::d3dmetal`]'s job.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,6 +27,23 @@ use crate::{Error, Result};
 pub const LIB_EXTERNAL: &str = "lib/external";
 /// File recording which toolkit version was imported.
 pub const VERSION_FILE: &str = "VERSION";
+/// Directory (relative to the GPTK dir) with Apple's PE forwarders.
+pub const LIB_WINE_WINDOWS: &str = "lib/wine/x86_64-windows";
+/// Directory (relative to the GPTK dir) with the unix-side bridge names.
+pub const LIB_WINE_UNIX: &str = "lib/wine/x86_64-unix";
+/// The shared library every unix bridge name resolves to.
+pub const SHARED_LIB: &str = "libd3dshared.dylib";
+/// Target of every unix bridge symlink, relative to `x86_64-unix/`.
+pub const UNIX_LINK_TARGET: &str = "../../external/libd3dshared.dylib";
+/// The D3D forwarders deployed into an engine. GPTK 4 has no d3d9 forwarder.
+/// Apple also ships `nvapi64.dll` and `nvngx-on-metalfx.dll`; they are copied
+/// on import but not deployed (see `docs/graphics.md`).
+pub const FORWARDERS: [&str; 4] = ["d3d10.dll", "d3d11.dll", "d3d12.dll", "dxgi.dll"];
+/// Wine marks the PE files it builds with this string right after the DOS
+/// header (offset 0x40); see `builtin_signature` in Wine's
+/// `dlls/ntdll/unix/loader.c`. Apple's forwarders carry it.
+const BUILTIN_SIGNATURE: &[u8] = b"Wine builtin DLL";
+const BUILTIN_SIGNATURE_OFFSET: usize = 0x40;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GptkImport {
@@ -73,12 +100,145 @@ fn copy_into(external: &Path, staging: &Path, version: Option<&str>) -> Result<(
     fs::create_dir_all(&target).map_err(|e| Error::io(&target, e))?;
     // `ditto` preserves symlinks and framework layout, unlike a naive recursive copy.
     run("ditto", &[external.as_os_str(), target.as_os_str()])?;
+    if let Some(lib) = external.parent() {
+        copy_forwarders(&lib.join("wine/x86_64-windows"), staging)?;
+    }
     let version_file = staging.join(VERSION_FILE);
     let text = match version {
         Some(v) => format!("{v}\n"),
         None => String::new(),
     };
     fs::write(&version_file, text).map_err(|e| Error::io(version_file, e))
+}
+
+/// Copy every `*.dll` of Apple's `x86_64-windows` folder (if the toolkit has
+/// one) and recreate the unix bridge names for the forwarders found.
+fn copy_forwarders(windows: &Path, staging: &Path) -> Result<()> {
+    let Ok(entries) = fs::read_dir(windows) else {
+        return Ok(()); // an older toolkit without forwarders: external only
+    };
+    let target = staging.join(LIB_WINE_WINDOWS);
+    fs::create_dir_all(&target).map_err(|e| Error::io(&target, e))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_dll = path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("dll"));
+        if is_dll && path.is_file() {
+            let to = target.join(entry.file_name());
+            fs::copy(&path, &to).map_err(|e| Error::io(&to, e))?;
+        }
+    }
+    for name in FORWARDERS {
+        let dll = target.join(name);
+        if dll.is_file() && !is_builtin_pe(&dll)? {
+            return Err(Error::NotBuiltinDll { path: dll });
+        }
+    }
+    link_unix_bridges(&staging.join(LIB_WINE_UNIX), &target)
+}
+
+/// `<x86_64-unix>/<name>.so -> ../../external/libd3dshared.dylib` for every
+/// forwarder present in `windows`. Existing entries are replaced.
+pub fn link_unix_bridges(unix: &Path, windows: &Path) -> Result<()> {
+    fs::create_dir_all(unix).map_err(|e| Error::io(unix, e))?;
+    for name in FORWARDERS {
+        if !windows.join(name).is_file() {
+            continue;
+        }
+        let link = unix.join(name.replace(".dll", ".so"));
+        if link.symlink_metadata().is_ok() {
+            fs::remove_file(&link).map_err(|e| Error::io(&link, e))?;
+        }
+        std::os::unix::fs::symlink(UNIX_LINK_TARGET, &link).map_err(|e| Error::io(&link, e))?;
+    }
+    Ok(())
+}
+
+/// Whether `path` is a PE file built by winebuild (Apple's forwarders are).
+pub fn is_builtin_pe(path: &Path) -> Result<bool> {
+    use std::io::Read;
+    let mut head = [0u8; BUILTIN_SIGNATURE_OFFSET + 16];
+    let mut file = fs::File::open(path).map_err(|e| Error::io(path, e))?;
+    let mut read = 0;
+    while read < head.len() {
+        match file.read(&mut head[read..]) {
+            Ok(0) => break,
+            Ok(n) => read += n,
+            Err(e) => return Err(Error::io(path, e)),
+        }
+    }
+    Ok(read == head.len()
+        && head.starts_with(b"MZ")
+        && &head[BUILTIN_SIGNATURE_OFFSET..] == BUILTIN_SIGNATURE)
+}
+
+/// What an import under `dir` contains, for deciding whether D3DMetal can be
+/// deployed from it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Payload {
+    pub dir: PathBuf,
+    pub version: Option<String>,
+    /// Required files that are not there, relative to `dir`.
+    pub missing: Vec<String>,
+}
+
+impl Payload {
+    pub fn is_complete(&self) -> bool {
+        self.missing.is_empty()
+    }
+
+    pub fn windows_dir(&self) -> PathBuf {
+        self.dir.join(LIB_WINE_WINDOWS)
+    }
+
+    pub fn external_dir(&self) -> PathBuf {
+        self.dir.join(LIB_EXTERNAL)
+    }
+
+    /// Error unless every file D3DMetal deployment needs is present.
+    pub fn require_complete(&self) -> Result<()> {
+        if self.is_complete() {
+            Ok(())
+        } else {
+            Err(Error::GptkIncomplete {
+                dir: self.dir.clone(),
+                missing: self.missing.clone(),
+            })
+        }
+    }
+}
+
+/// Inspect an import made by [`import`]; `None` when there is none at `dir`.
+/// Imports made before the forwarders were copied report them as missing.
+pub fn inspect(dir: &Path) -> Option<Payload> {
+    if !dir.join(LIB_EXTERNAL).is_dir() {
+        return None;
+    }
+    let version = fs::read_to_string(dir.join(VERSION_FILE))
+        .ok()
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty());
+    let mut missing = Vec::new();
+    for path in [
+        format!("{LIB_EXTERNAL}/{SHARED_LIB}"),
+        format!("{LIB_EXTERNAL}/D3DMetal.framework"),
+    ] {
+        if !dir.join(&path).exists() {
+            missing.push(path);
+        }
+    }
+    for name in FORWARDERS {
+        let path = format!("{LIB_WINE_WINDOWS}/{name}");
+        if !dir.join(&path).is_file() {
+            missing.push(path);
+        }
+    }
+    Some(Payload {
+        dir: dir.to_owned(),
+        version,
+        missing,
+    })
 }
 
 /// Find a `lib/external` directory at most four levels below `root`
@@ -219,7 +379,7 @@ fn run(program: &str, args: &[&std::ffi::OsStr]) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -244,6 +404,93 @@ mod tests {
         fs::create_dir_all(external.join("D3DMetal.framework")).unwrap();
         fs::write(external.join("D3DMetal.framework/D3DMetal"), "bin").unwrap();
         fs::write(external.join("libd3dshared.dylib"), "lib").unwrap();
+    }
+
+    /// A synthetic GPTK tree with builtin-marked forwarders (not Apple's code).
+    pub(crate) fn fake_full_toolkit(root: &Path) {
+        fake_toolkit(root);
+        let windows = root.join("redist/lib/wine/x86_64-windows");
+        fs::create_dir_all(&windows).unwrap();
+        for name in FORWARDERS.iter().chain(&["nvngx-on-metalfx.dll"]) {
+            fs::write(windows.join(name), fake_builtin_dll(name)).unwrap();
+        }
+        // Apple's unix side: symlinks; ours are ignored and recreated on import.
+        fs::create_dir_all(root.join("redist/lib/wine/x86_64-unix")).unwrap();
+    }
+
+    pub(crate) fn fake_builtin_dll(tag: &str) -> Vec<u8> {
+        let mut bytes = vec![0u8; BUILTIN_SIGNATURE_OFFSET];
+        bytes[..2].copy_from_slice(b"MZ");
+        bytes.extend_from_slice(BUILTIN_SIGNATURE);
+        bytes.extend_from_slice(tag.as_bytes());
+        bytes
+    }
+
+    #[test]
+    fn imports_forwarders_and_links_unix_bridges() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mounted = tmp.path().join("Game_Porting_Toolkit_4.0");
+        fake_full_toolkit(&mounted);
+        let dest = tmp.path().join("gptk");
+        import(&mounted, &dest, None).unwrap();
+
+        let payload = inspect(&dest).unwrap();
+        assert!(payload.is_complete(), "{:?}", payload.missing);
+        assert_eq!(payload.version.as_deref(), Some("4.0"));
+        assert!(dest
+            .join(LIB_WINE_WINDOWS)
+            .join("nvngx-on-metalfx.dll")
+            .is_file());
+        let link = dest.join(LIB_WINE_UNIX).join("d3d12.so");
+        assert_eq!(fs::read_link(&link).unwrap(), Path::new(UNIX_LINK_TARGET));
+        // The link resolves to the shared library inside the import.
+        assert_eq!(fs::read_to_string(&link).unwrap(), "lib");
+    }
+
+    #[test]
+    fn old_imports_report_missing_forwarders() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(inspect(tmp.path()).is_none());
+        let mounted = tmp.path().join("gptk3");
+        fake_toolkit(&mounted);
+        let dest = tmp.path().join("gptk");
+        import(&mounted, &dest, Some("3.0")).unwrap();
+        let payload = inspect(&dest).unwrap();
+        assert!(!payload.is_complete());
+        assert!(payload
+            .missing
+            .contains(&"lib/wine/x86_64-windows/dxgi.dll".to_owned()));
+        let err = payload.require_complete().unwrap_err().to_string();
+        assert!(err.contains("re-import"), "{err}");
+    }
+
+    #[test]
+    fn rejects_forwarders_that_are_not_wine_builtins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mounted = tmp.path().join("fake");
+        fake_full_toolkit(&mounted);
+        fs::write(
+            mounted.join("redist/lib/wine/x86_64-windows/d3d11.dll"),
+            b"MZ not a builtin",
+        )
+        .unwrap();
+        let err = import(&mounted, &tmp.path().join("gptk"), None).unwrap_err();
+        assert!(matches!(err, Error::NotBuiltinDll { .. }), "{err}");
+        assert!(!tmp.path().join("gptk").exists());
+    }
+
+    #[test]
+    fn builtin_marker_detection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("x.dll");
+        fs::write(&p, fake_builtin_dll("x")).unwrap();
+        assert!(is_builtin_pe(&p).unwrap());
+        fs::write(&p, b"MZ").unwrap();
+        assert!(!is_builtin_pe(&p).unwrap());
+        let mut native = fake_builtin_dll("x");
+        native[0x40] = b'X';
+        fs::write(&p, native).unwrap();
+        assert!(!is_builtin_pe(&p).unwrap());
     }
 
     #[test]

@@ -1,0 +1,24 @@
+# Unverified: written from the source below, never run with cross-app.
+# Settings that need D3DMetal fall back to wined3d until the engine has a
+# D3DMetal overlay; sync modes are skipped on engines without esync/msync.
+
+schema = 1
+id = "skyrim-se"
+name = "The Elder Scrolls V: Skyrim Special Edition"
+steam_appid = 489830
+exe_names = ["SkyrimSE.exe"]
+rating = "green"
+backend = "d3dmetal"
+sync = "msync"
+known_bugs = [
+    "ENB shader presets may render effects inverted or not at all.",
+]
+notes = [
+    "The source rates vanilla play; heavily modded setups may need DXVK.",
+]
+
+[source]
+name = "frankea/Whisky community game database (GameDB.json, entry \"skyrim-se\"), which cites https://github.com/whisky-app/whisky/issues/1246"
+url = "https://github.com/frankea/Whisky/blob/main/WhiskyKit/Sources/WhiskyKit/GameDatabase/Resources/GameDB.json"
+reported_rating = "works"
+reported_on = "Wine 10.0, macOS 15.4, arm64 (tested 2026-04-30 per the source)"

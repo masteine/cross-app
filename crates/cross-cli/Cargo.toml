@@ -14,6 +14,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 clap.workspace = true
 cross-bottle = { path = "../cross-bottle" }
+cross-compat = { path = "../cross-compat" }
 cross-core = { path = "../cross-core" }
 cross-deps = { path = "../cross-deps" }
 cross-engine = { path = "../cross-engine" }

@@ -191,6 +191,7 @@ exit 0
             wine_bin: "bin/wine".into(),
             backends: vec![GraphicsBackend::D3dMetal],
             components: vec![],
+            gptk_capable: false,
             source_sha256: "0".repeat(64),
             installed_unix: 0,
         };

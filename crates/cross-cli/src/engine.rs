@@ -44,11 +44,36 @@ pub enum EngineCommand {
         #[arg(long)]
         version: Option<String>,
     },
+    /// Plug the imported D3DMetal into an engine (an APFS-cloned overlay), or remove it
+    D3dmetal {
+        #[command(subcommand)]
+        command: D3dMetalCommand,
+    },
     /// Install Rosetta 2 (asks for confirmation first)
     InstallRosetta {
         /// Do not ask for confirmation
         #[arg(short, long)]
         yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum D3dMetalCommand {
+    /// Build the D3DMetal overlay of an engine from the imported GPTK
+    Enable {
+        id: String,
+        /// Build it even though the engine is not known to run D3DMetal
+        /// (upstream Wine crashes in D3DMetal code)
+        #[arg(long)]
+        force: bool,
+    },
+    /// Delete the engine's D3DMetal overlay
+    Disable { id: String },
+    /// Show what the engine supports and whether D3DMetal is set up
+    Status {
+        id: String,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -64,8 +89,114 @@ pub fn run(command: EngineCommand, dirs: &AppDirs, config: &Config) -> Result<Ex
         EngineCommand::ImportGptk { path, version } => {
             import_gptk(dirs, config, &path, version.as_deref())
         }
+        EngineCommand::D3dmetal { command } => d3dmetal(dirs, config, command),
         EngineCommand::InstallRosetta { yes } => install_rosetta(yes),
     }
+}
+
+fn d3dmetal(dirs: &AppDirs, config: &Config, command: D3dMetalCommand) -> Result<ExitCode> {
+    let manager = EngineManager::new(dirs);
+    let gptk_dir = config.gptk_dir(dirs);
+    match command {
+        D3dMetalCommand::Enable { id, force } => {
+            if force {
+                eprintln!(
+                    "warning: building the D3DMetal overlay of {id} with --force; on upstream Wine \
+                     builds programs that use D3DMetal crash (https://github.com/frankea/Whisky/issues/163)"
+                );
+            }
+            let overlay = manager.enable_d3dmetal(&id, &gptk_dir, force)?;
+            println!(
+                "D3DMetal overlay of {id} ready (GPTK {}) at {}.",
+                overlay
+                    .record
+                    .gptk_version
+                    .as_deref()
+                    .unwrap_or("unknown version"),
+                overlay.dir.display()
+            );
+            println!("Bottles and games with the d3dmetal backend on {id} now use it.");
+        }
+        D3dMetalCommand::Disable { id } => {
+            if manager.disable_d3dmetal(&id)? {
+                println!("Removed the D3DMetal overlay of {id}.");
+            } else {
+                println!("{id} has no D3DMetal overlay.");
+            }
+        }
+        D3dMetalCommand::Status { id, json } => {
+            let engine = manager
+                .get(&id)?
+                .ok_or_else(|| anyhow::anyhow!("engine {id:?} is not installed"))?;
+            let features = cross_engine::features::probe(&manager.wine_path(&engine));
+            let overlay = manager.d3dmetal_overlay(&engine)?;
+            let payload = gptk::inspect(&gptk_dir);
+            if json {
+                let value = serde_json::json!({
+                    "engine": id,
+                    "gptk_capable": engine.gptk_capable,
+                    "features": features,
+                    "gptk": payload.as_ref().map(|p| serde_json::json!({
+                        "dir": p.dir, "version": p.version, "missing": p.missing,
+                    })),
+                    "overlay": overlay.as_ref().map(|o| serde_json::json!({
+                        "dir": o.dir,
+                        "gptk_version": o.record.gptk_version,
+                        "forced": o.record.forced,
+                        "stale": o.is_stale(payload.as_ref()),
+                    })),
+                });
+                println!("{}", serde_json::to_string_pretty(&value)?);
+                return Ok(ExitCode::SUCCESS);
+            }
+            let yes = |b: bool| if b { "yes" } else { "no" };
+            println!(
+                "Engine {id}: known to run D3DMetal: {}",
+                yes(engine.gptk_capable)
+            );
+            if features.inspected {
+                println!(
+                    "Detected: esync {}, msync {}, CPU count limit (WINENCPU) {}, Retina mode {}",
+                    yes(features.esync),
+                    yes(features.msync),
+                    yes(features.cpu_count_override),
+                    yes(features.retina_mode)
+                );
+            } else {
+                println!("Detected: could not inspect the engine's unix libraries");
+            }
+            match &payload {
+                Some(p) if p.is_complete() => println!(
+                    "GPTK import: {} at {}",
+                    p.version.as_deref().unwrap_or("unknown version"),
+                    p.dir.display()
+                ),
+                Some(p) => println!(
+                    "GPTK import: incomplete (missing {}); re-import it",
+                    p.missing.join(", ")
+                ),
+                None => println!("GPTK import: none (cross engine import-gptk <dmg>)"),
+            }
+            match &overlay {
+                Some(o) => println!(
+                    "D3DMetal overlay: {}{}{}",
+                    o.dir.display(),
+                    if o.record.forced {
+                        " (built with --force)"
+                    } else {
+                        ""
+                    },
+                    if o.is_stale(payload.as_ref()) {
+                        " (older than the GPTK import; run enable again)"
+                    } else {
+                        ""
+                    }
+                ),
+                None => println!("D3DMetal overlay: none (cross engine d3dmetal enable {id})"),
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn translation_name(t: Translation) -> &'static str {

@@ -10,6 +10,7 @@ use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
 
+use cross_bottle::graphics::{self, GraphicsPlan, SettingsUpdate};
 use cross_bottle::launch::{self, Flags, LaunchRequest};
 use cross_bottle::Runtime;
 use cross_core::config::BottleStore;
@@ -20,9 +21,6 @@ use crate::install::is_installed;
 use crate::patches::SteamPatches;
 use crate::{Error, Result, STEAM_EXE_WIN};
 
-/// DLLs that select the Direct3D 10/11 implementation.
-const D3D_DLLS: [&str; 2] = ["d3d10core", "d3d11"];
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GameLaunch {
     /// Steam was already running, so per-game settings could not be applied.
@@ -31,6 +29,8 @@ pub struct GameLaunch {
     pub has_profile: bool,
     /// Where Steam's output goes.
     pub log: PathBuf,
+    /// The graphics configuration `steam.exe` was started with.
+    pub graphics: GraphicsPlan,
 }
 
 /// Per-game settings stored in `bottle.toml` (an `App` with this `steam_appid`).
@@ -43,65 +43,47 @@ pub fn game_profile(bottle: &Bottle, appid: u32) -> Option<&LaunchProfile> {
 }
 
 /// Everything `steam.exe` is started with: the patch file's flags, then the
-/// game's backend/env/overrides, then `-applaunch <appid> <game args>`.
+/// game's env/overrides/args, then what the graphics `plan` adds (explicit
+/// values win), then `-applaunch <appid> <game args>`.
 pub fn steam_request(
     patches: &SteamPatches,
     bottle: &Bottle,
     appid: Option<u32>,
     extra_args: &[String],
-) -> Result<LaunchRequest> {
+    plan: &GraphicsPlan,
+) -> LaunchRequest {
     let mut profile = patches.launch_profile();
     let mut args = extra_args.to_vec();
 
     if let Some(appid) = appid {
         args.extend(["-applaunch".to_owned(), appid.to_string()]);
         if let Some(game) = game_profile(bottle, appid) {
-            if let Some(backend) = game.backend {
-                for (dll, mode) in backend_overrides(bottle, backend)? {
-                    profile.dll_overrides.insert(dll, mode);
-                }
-            }
             profile.env.extend(game.env.clone());
             profile.dll_overrides.extend(game.dll_overrides.clone());
             args.extend(game.args.iter().cloned());
         }
     }
+    plan.apply_to(&mut profile);
 
-    Ok(LaunchRequest {
+    LaunchRequest {
         target: STEAM_EXE_WIN.to_owned(),
         args,
         working_dir: None,
         profile,
         flags: Flags::default(),
-    })
+    }
 }
 
-/// DLL overrides that pick a Direct3D 10/11 backend for one game.
-///
-/// `dxvk` uses the DXVK DLLs installed by `cross deps install <bottle> dxvk`.
-/// `d3dmetal` forces Wine's built-in Direct3D for these DLLs (undoing a
-/// bottle-wide DXVK override); routing it through Apple's D3DMetal needs the GPTK
-/// libraries wired into the engine, which arrives with the backend switch in Sprint 7.
-pub fn backend_overrides(
-    bottle: &Bottle,
-    backend: GraphicsBackend,
-) -> Result<Vec<(String, String)>> {
-    let mode = match backend {
-        GraphicsBackend::Dxvk => {
-            if !bottle.deps.contains_key("dxvk") {
-                return Err(Error::InvalidInput(format!(
-                    "the dxvk backend needs DXVK in the bottle: cross deps install {} dxvk",
-                    bottle.id
-                )));
-            }
-            "native"
-        }
-        GraphicsBackend::D3dMetal => "builtin",
-    };
-    Ok(D3D_DLLS
-        .iter()
-        .map(|d| ((*d).to_owned(), mode.to_owned()))
-        .collect())
+/// Check that `backend` can be used for a game in `bottle` (DXVK must be
+/// installed in it).
+pub fn validate_backend(bottle: &Bottle, backend: GraphicsBackend) -> Result<()> {
+    if backend == GraphicsBackend::Dxvk && !bottle.deps.contains_key("dxvk") {
+        return Err(Error::InvalidInput(format!(
+            "the dxvk backend needs DXVK in the bottle: cross deps install {} dxvk",
+            bottle.id
+        )));
+    }
+    Ok(())
 }
 
 /// Open the bottle, check Steam is there and bring its registry patches up to
@@ -126,9 +108,13 @@ fn prepare(dirs: &AppDirs, bottle_id: &str) -> Result<(Bottle, Runtime, SteamPat
 
 /// Run the Steam client in the foreground until it exits.
 pub fn run_client(dirs: &AppDirs, bottle_id: &str, extra_args: &[String]) -> Result<ExitStatus> {
-    let (bottle, runtime, patches) = prepare(dirs, bottle_id)?;
-    let request = steam_request(&patches, &bottle, None, extra_args)?;
-    Ok(launch::run(&runtime, &request)?)
+    let (bottle, _, patches) = prepare(dirs, bottle_id)?;
+    let plan = graphics::plan_for(dirs, &bottle, None)?;
+    for warning in &plan.warnings {
+        tracing::warn!(bottle = bottle_id, "{warning}");
+    }
+    let request = steam_request(&patches, &bottle, None, extra_args, &plan);
+    Ok(launch::run(&plan.runtime(dirs, bottle_id), &request)?)
 }
 
 /// Start a game through Steam and return right away; Steam keeps running in the
@@ -139,9 +125,11 @@ pub fn launch_game(dirs: &AppDirs, bottle_id: &str, appid: u32) -> Result<GameLa
         .processes()?
         .iter()
         .any(|p| p.name.eq_ignore_ascii_case("steam.exe"));
-    let has_profile = game_profile(&bottle, appid).is_some_and(|p| *p != LaunchProfile::default());
+    let game = game_profile(&bottle, appid);
+    let has_profile = game.is_some_and(|p| *p != LaunchProfile::default());
 
-    let request = steam_request(&patches, &bottle, Some(appid), &[])?;
+    let plan = graphics::plan_for(dirs, &bottle, game)?;
+    let request = steam_request(&patches, &bottle, Some(appid), &[], &plan);
     let logs = dirs.bottle_logs_dir(bottle_id);
     std::fs::create_dir_all(&logs).map_err(|e| Error::io(&logs, e))?;
     let log = logs.join("steam.log");
@@ -153,12 +141,13 @@ pub fn launch_game(dirs: &AppDirs, bottle_id: &str, appid: u32) -> Result<GameLa
             .map_err(|e| Error::io(&log, e))
     };
 
-    let mut cmd = launch::build_command(&runtime, &request)?;
+    let mut cmd = launch::build_command(&plan.runtime(dirs, bottle_id), &request)?;
     cmd.stdin(Stdio::null()).stdout(open()?).stderr(open()?);
     tracing::info!(
         bottle = bottle_id,
         appid,
         steam_was_running,
+        backend = ?plan.effective,
         "launching game via Steam"
     );
     cmd.spawn()
@@ -167,6 +156,7 @@ pub fn launch_game(dirs: &AppDirs, bottle_id: &str, appid: u32) -> Result<GameLa
         steam_was_running,
         has_profile,
         log,
+        graphics: plan,
     })
 }
 
@@ -177,6 +167,8 @@ pub struct ProfileUpdate {
     pub backend: Option<GraphicsBackend>,
     pub env: Vec<(String, String)>,
     pub args: Option<Vec<String>>,
+    /// Graphics switches for this game (HUDs, sync, CPU count).
+    pub graphics: SettingsUpdate,
     /// Drop all settings for the game.
     pub clear: bool,
 }
@@ -196,7 +188,7 @@ pub fn update_game_profile(
         return Ok(None);
     }
     if let Some(backend) = update.backend {
-        backend_overrides(&bottle, backend)?; // validate before saving
+        validate_backend(&bottle, backend)?; // before anything is saved
     }
     let index = match bottle
         .apps
@@ -231,6 +223,7 @@ pub fn update_game_profile(
     if let Some(args) = update.args {
         app.profile.args = args;
     }
+    update.graphics.apply(&mut app.profile.graphics)?;
     let app = app.clone();
     store.save(&bottle)?;
     Ok(Some(app))
@@ -238,7 +231,10 @@ pub fn update_game_profile(
 
 #[cfg(test)]
 mod tests {
-    use cross_core::model::{DepRecord, DepSource};
+    use cross_bottle::graphics::{plan, EffectiveBackend, EngineGraphics};
+    use cross_core::model::{DepRecord, DepSource, GraphicsSettings, SyncMode};
+    use cross_engine::d3dmetal::{Overlay, OverlayRecord};
+    use cross_engine::features::EngineFeatures;
 
     use super::*;
 
@@ -248,10 +244,43 @@ mod tests {
         b
     }
 
+    /// An engine with a D3DMetal overlay (synthetic; nothing runs).
+    fn engine(overlay: bool) -> EngineGraphics {
+        EngineGraphics {
+            engine_id: "eng".into(),
+            wine: "/e/bin/wine".into(),
+            d3dmetal: overlay.then(|| Overlay {
+                dir: "/e/d3dmetal".into(),
+                wine: "/e/d3dmetal/bin/wine".into(),
+                record: OverlayRecord {
+                    gptk_version: Some("4.0".into()),
+                    forced: false,
+                    created_unix: 0,
+                },
+            }),
+            d3dmetal_stale: false,
+            features: EngineFeatures {
+                inspected: true,
+                msync: true,
+                ..Default::default()
+            },
+        }
+    }
+
+    fn request(b: &Bottle, appid: Option<u32>, overlay: bool) -> (LaunchRequest, GraphicsPlan) {
+        let game = appid.and_then(|id| game_profile(b, id));
+        let plan = plan(b, &engine(overlay), game).unwrap();
+        (
+            steam_request(&SteamPatches::builtin(), b, appid, &[], &plan),
+            plan,
+        )
+    }
+
     #[test]
     fn plain_client_launch_uses_patch_flags() {
         let patches = SteamPatches::builtin();
-        let req = steam_request(&patches, &bottle(), None, &["-console".into()]).unwrap();
+        let plan = plan(&bottle(), &engine(false), None).unwrap();
+        let req = steam_request(&patches, &bottle(), None, &["-console".into()], &plan);
         assert_eq!(req.target, STEAM_EXE_WIN);
         assert_eq!(req.args, ["-console"]);
         assert_eq!(req.profile.args, patches.launch.args);
@@ -283,27 +312,66 @@ mod tests {
             profile,
         });
 
-        let req = steam_request(&SteamPatches::builtin(), &b, Some(220), &[]).unwrap();
+        let (req, plan) = request(&b, Some(220), true);
+        assert_eq!(plan.effective, EffectiveBackend::Dxvk);
+        assert_eq!(plan.wine, std::path::Path::new("/e/bin/wine"));
         assert_eq!(req.args, ["-applaunch", "220", "-windowed"]);
         assert_eq!(req.profile.env["DXVK_HUD"], "fps");
         assert_eq!(req.profile.dll_overrides["d3d11"], "native");
         assert_eq!(req.profile.dll_overrides["d3d10core"], "native");
         assert_eq!(req.profile.dll_overrides["xinput1_3"], "native");
 
-        // Another game gets nothing extra.
-        let other = steam_request(&SteamPatches::builtin(), &b, Some(440), &[]).unwrap();
+        // Another game follows the bottle (D3DMetal by default): no extras
+        // without an overlay, Apple's forwarders through the overlay with one.
+        let (other, _) = request(&b, Some(440), false);
         assert_eq!(other.args, ["-applaunch", "440"]);
         assert!(!other.profile.dll_overrides.contains_key("d3d11"));
+        let (other, plan) = request(&b, Some(440), true);
+        assert_eq!(plan.effective, EffectiveBackend::D3dMetal);
+        assert_eq!(plan.wine, std::path::Path::new("/e/d3dmetal/bin/wine"));
+        assert_eq!(other.profile.dll_overrides["d3d12"], "builtin");
+        assert_eq!(other.profile.dll_overrides["dxgi"], "builtin");
+    }
+
+    #[test]
+    fn d3dmetal_game_gets_the_overlay_and_its_switches() {
+        let mut b = bottle();
+        b.graphics.sync = Some(SyncMode::Msync);
+        b.apps.push(App {
+            name: "BG3".into(),
+            path: STEAM_EXE_WIN.into(),
+            steam_appid: Some(1086940),
+            profile: LaunchProfile {
+                backend: Some(GraphicsBackend::D3dMetal),
+                graphics: GraphicsSettings {
+                    metal_hud: Some(true),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        });
+        let (req, plan) = request(&b, Some(1086940), true);
+        assert_eq!(plan.effective, EffectiveBackend::D3dMetal);
+        assert_eq!(req.profile.env["MTL_HUD_ENABLED"], "1");
+        assert_eq!(req.profile.env["WINEMSYNC"], "1");
+        assert_eq!(req.profile.dll_overrides["d3d11"], "builtin");
+        // The Steam patch flags survive.
+        assert_eq!(req.profile.args, SteamPatches::builtin().launch.args);
+
+        // Without an overlay the game is told it runs on wined3d.
+        let (req, plan) = request(&b, Some(1086940), false);
+        assert_eq!(plan.effective, EffectiveBackend::Wined3d);
+        assert_eq!(req.profile.dll_overrides["d3d11"], "builtin");
+        assert!(!plan.warnings.is_empty());
     }
 
     #[test]
     fn dxvk_backend_requires_dxvk_in_the_bottle() {
-        let err = backend_overrides(&bottle(), GraphicsBackend::Dxvk)
+        let err = validate_backend(&bottle(), GraphicsBackend::Dxvk)
             .unwrap_err()
             .to_string();
         assert!(err.contains("cross deps install games dxvk"), "{err}");
-        let builtin = backend_overrides(&bottle(), GraphicsBackend::D3dMetal).unwrap();
-        assert!(builtin.iter().all(|(_, m)| m == "builtin"));
+        validate_backend(&bottle(), GraphicsBackend::D3dMetal).unwrap();
     }
 
     #[test]
@@ -321,6 +389,10 @@ mod tests {
                 backend: Some(GraphicsBackend::D3dMetal),
                 env: vec![("A".into(), "1".into()), ("B".into(), "2".into())],
                 args: Some(vec!["-novid".into()]),
+                graphics: SettingsUpdate {
+                    metal_hud_log: Some(Some(true)),
+                    ..Default::default()
+                },
                 clear: false,
             },
         )
@@ -328,6 +400,7 @@ mod tests {
         .unwrap();
         assert_eq!(app.name, "Half-Life 2");
         assert_eq!(app.profile.backend, Some(GraphicsBackend::D3dMetal));
+        assert_eq!(app.profile.graphics.metal_hud_log, Some(true));
 
         // Empty value removes a variable; untouched fields stay.
         let app = update_game_profile(

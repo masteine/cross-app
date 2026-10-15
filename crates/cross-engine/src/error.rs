@@ -48,6 +48,16 @@ pub enum Error {
     GptkNotFound(PathBuf),
     #[error("`{program}` failed: {message}")]
     Command { program: String, message: String },
+    #[error("the imported Game Porting Toolkit at {dir} is incomplete (missing: {}); re-import it with `cross engine import-gptk`", .missing.join(", "))]
+    GptkIncomplete { dir: PathBuf, missing: Vec<String> },
+    #[error("{path} is not a Wine builtin DLL, so it is not Apple's D3DMetal forwarder")]
+    NotBuiltinDll { path: PathBuf },
+    #[error("engine {0:?} is not known to run D3DMetal (it needs a CrossOver-derived Wine build); pass --force to try anyway")]
+    NotGptkCapable(String),
+    #[error(
+        "engine {engine:?} does not have the expected `bin/../lib/wine/x86_64-windows` layout"
+    )]
+    UnsupportedLayout { engine: String },
 }
 
 impl Error {

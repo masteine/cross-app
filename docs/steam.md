@@ -49,8 +49,8 @@ cross steam profile steam 220 --clear    # прибрати
 | Вхід у Steam (логін, 2FA) | **не перевірено**. Вхід виконує користувач сам у вікні Steam, cross-app паролів не торкається. |
 | Store / Library (CEF) | **не перевірено**. winetricks для цього додатково ставить `corefonts`, а в нашому каталозі verbs його ще немає. Без нього текст може не показуватись. |
 | Оверлей Steam | вимкнено патчем (bug 22053). Shift+Tab-оверлей не працюватиме. |
-| Steam Input / геймпади | **не перевірено** (контролери — Спринт 7) |
+| Steam Input / геймпади | **не перевірено**. Бекенди контролерів Wine (SDL/IOHID) налаштовуються командою `cross bottle preset <пляшка> gamepad`, див. [graphics.md](graphics.md#геймпади) |
 | Steam Cloud | **не перевірено**. Синхронізація йде всередині клієнта і має працювати як звичайна мережева функція, але підтверджень немає. |
 | Налаштування гри при вже запущеному Steam | не застосовуються: працюючий клієнт запускає гру зі своїм оточенням. `cross steam launch` попереджає про це. |
-| `--backend d3dmetal` | поки що означає вбудований Direct3D Wine для `d3d10core`/`d3d11`. Справжнє підключення D3DMetal з GPTK — Спринт 7. |
+| `--backend d3dmetal` | D3DMetal через оверлей двигуна (`cross engine d3dmetal enable`), тоді `steam.exe` стартує з `wine` оверлею. Без оверлею використовується вбудований Direct3D Wine. На upstream-двигунах каталогу D3DMetal не працює, див. [graphics.md](graphics.md#як-підключається-d3dmetal). Інші налаштування гри: `cross bottle graphics <пляшка> --appid <appid>`. |
 | Ігри з анти-чітом (EAC, BattlEye, Vanguard) | не підтримуються (not-a-goal) |

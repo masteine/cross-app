@@ -1,0 +1,26 @@
+# Unverified: written from the source below, never run with cross-app.
+# Settings that need D3DMetal fall back to wined3d until the engine has a
+# D3DMetal overlay; sync modes are skipped on engines without esync/msync.
+
+schema = 1
+id = "age-of-empires-2-de"
+name = "Age of Empires II: Definitive Edition"
+steam_appid = 813780
+exe_names = ["AoE2DE_s.exe"]
+rating = "yellow"
+backend = "dxvk"
+sync = "msync"
+deps = ["vcrun2022", "dxvk", "dotnet48", "xact"]
+env = { DXVK_ASYNC = "1" }
+notes = [
+    "The source rates it unverified, hence yellow.",
+    "dotnet48 and xact are not in the cross-app verb catalog; they install through winetricks if it is present.",
+    "DXVK_ASYNC=1 turns on background shader compilation in the async DXVK build cross-app installs (its d3d11.dll reads the variable); Whisky sets it the same way.",
+    "Stands in for the 32-bit Age of Empires II HD of the test matrix, which the source does not cover.",
+]
+
+[source]
+name = "frankea/Whisky community game database (GameDB.json, entry \"aoe2-de\"), which cites https://github.com/whisky-app/whisky/issues/314"
+url = "https://github.com/frankea/Whisky/blob/main/WhiskyKit/Sources/WhiskyKit/GameDatabase/Resources/GameDB.json"
+reported_rating = "unverified"
+reported_on = "Wine 10.0, macOS 15.4, arm64 (2026-04-30 per the source)"

@@ -1,7 +1,9 @@
 //! Registry presets: DPI scaling, Windows version and virtual desktop.
 //!
-//! A DXVA preset is not offered: there is no verified Wine registry switch for
-//! it yet (tracked for Sprint 7 together with the graphics options).
+//! A DXVA preset is not offered: upstream Wine 11.18's `dxva2` implements no
+//! decoder at all (every `IDirectXVideoDecoderService` method in
+//! `dlls/dxva2/main.c` returns `E_NOTIMPL`) and reads no registry switch, so
+//! there is nothing to turn on. See `docs/graphics.md`.
 
 use cross_core::model::WindowsVersion;
 

@@ -268,6 +268,7 @@ mod tests {
             wine_bin: "fake-engine/bin/wine".into(),
             backends: vec![],
             components: vec![],
+            gptk_capable: false,
             source_sha256: "0".repeat(64),
             installed_unix: 0,
         };

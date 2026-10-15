@@ -47,6 +47,11 @@ pub struct EngineEntry {
     /// Component ids installed with the DXVK + MoltenVK backend.
     #[serde(default)]
     pub components: Vec<String>,
+    /// The build can execute Apple's D3DMetal (a CrossOver-derived Wine).
+    /// Upstream Wine cannot: the payload loads and then every process using it
+    /// dies (https://github.com/frankea/Whisky/issues/163). Absent = false.
+    #[serde(default)]
+    pub gptk_capable: bool,
 }
 
 impl EngineEntry {

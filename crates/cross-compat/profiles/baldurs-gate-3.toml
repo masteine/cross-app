@@ -1,0 +1,23 @@
+# Unverified: written from the source below, never run with cross-app.
+# Settings that need D3DMetal fall back to wined3d until the engine has a
+# D3DMetal overlay; sync modes are skipped on engines without esync/msync.
+
+schema = 1
+id = "baldurs-gate-3"
+name = "Baldur's Gate 3"
+steam_appid = 1086940
+exe_names = ["bg3_dx11.exe", "bg3.exe"]
+rating = "yellow"
+backend = "d3dmetal"
+sync = "esync"
+deps = ["vcrun2022"]
+known_bugs = [
+    "The Vulkan renderer (bg3.exe) crashes; use the DirectX 11 renderer (bg3_dx11.exe).",
+    "The character creation screen may show cosmetic rendering artifacts.",
+]
+
+[source]
+name = "frankea/Whisky community game database (GameDB.json, entry \"baldurs-gate-3\")"
+url = "https://github.com/frankea/Whisky/blob/main/WhiskyKit/Sources/WhiskyKit/GameDatabase/Resources/GameDB.json"
+reported_rating = "playable"
+reported_on = "Whisky 3.0.0, Wine 10.0, macOS 15.3, arm64 (tested 2026-01-08 per the source)"

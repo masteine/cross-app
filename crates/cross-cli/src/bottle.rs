@@ -3,19 +3,62 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{Subcommand, ValueEnum};
+use cross_bottle::graphics::{self, EngineGraphics, GraphicsPlan, SettingsUpdate};
+use cross_bottle::input::GamepadOptions;
 use cross_bottle::launch::{self, Flags, LaunchRequest, Tool};
 use cross_bottle::manager::{BottleManager, CreateOptions};
 use cross_bottle::presets::parse_resolution;
 use cross_bottle::processes::{running_wineservers, StopMode};
 use cross_bottle::registry::RegType;
 use cross_bottle::Runtime;
+use cross_core::config::BottleStore;
 use cross_core::config::Config;
-use cross_core::model::{LaunchProfile, WindowsVersion};
+use cross_core::model::{GraphicsBackend, LaunchProfile, SyncMode, WindowsVersion};
 use cross_core::paths::AppDirs;
+use cross_steam::launch::{game_profile, update_game_profile, validate_backend, ProfileUpdate};
 
 use crate::prompt::confirm;
+use crate::steam::BackendArg;
+
+/// `on`, `off` or `inherit` (from the bottle, or Wine's default).
+#[derive(Clone, Copy, ValueEnum)]
+pub enum Toggle {
+    On,
+    Off,
+    Inherit,
+}
+
+impl Toggle {
+    fn update(self) -> Option<bool> {
+        match self {
+            Toggle::On => Some(true),
+            Toggle::Off => Some(false),
+            Toggle::Inherit => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub enum OnOff {
+    On,
+    Off,
+}
+
+impl OnOff {
+    fn on(self) -> bool {
+        matches!(self, OnOff::On)
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub enum SyncArg {
+    None,
+    Esync,
+    Msync,
+    Inherit,
+}
 
 #[derive(Clone, Copy, ValueEnum)]
 pub enum WindowsArg {
@@ -116,6 +159,40 @@ pub enum BottleCommand {
         #[arg(value_enum)]
         tool: ToolArg,
     },
+    /// Show or change graphics settings of a bottle or one of its Steam games
+    Graphics {
+        id: String,
+        /// Change a Steam game's settings instead of the bottle's
+        #[arg(long)]
+        appid: Option<u32>,
+        /// Direct3D backend
+        #[arg(long, value_enum)]
+        backend: Option<BackendArg>,
+        /// Apple's Metal performance HUD (MTL_HUD_ENABLED)
+        #[arg(long, value_enum)]
+        metal_hud: Option<Toggle>,
+        /// Log per-frame Metal HUD statistics for FPS numbers (MTL_HUD_LOG_ENABLED)
+        #[arg(long, value_enum)]
+        metal_hud_log: Option<Toggle>,
+        /// DXVK HUD spec such as fps,frametimes; `off` or `inherit`
+        #[arg(long, value_name = "SPEC")]
+        dxvk_hud: Option<String>,
+        /// Wine synchronization (only on engines built with esync/msync)
+        #[arg(long, value_enum)]
+        sync: Option<SyncArg>,
+        /// CPUs reported to programs, or `inherit` (only on engines that read WINENCPU)
+        #[arg(long, value_name = "N")]
+        cpu_count: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Summarize FPS from Metal HUD log lines (see `graphics --metal-hud-log`)
+    Fps {
+        /// Log file containing `metal-HUD:` lines (e.g. logs/steam.log)
+        file: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -146,6 +223,23 @@ pub enum PresetCommand {
     Dpi { value: u32 },
     /// Fixed-size window for every program, e.g. 1920x1080, or `off`
     VirtualDesktop { size: String },
+    /// Wine Mac driver Retina mode (full-resolution rendering on HiDPI screens)
+    Retina {
+        #[arg(value_enum)]
+        state: OnOff,
+    },
+    /// Game controller back ends of Wine's winebus driver; no options shows them
+    Gamepad {
+        /// Find controllers through SDL
+        #[arg(long, value_enum)]
+        sdl: Option<OnOff>,
+        /// Use raw IOHID devices
+        #[arg(long, value_enum)]
+        hidraw: Option<OnOff>,
+        /// Present SDL controllers as XInput-style gamepads
+        #[arg(long, value_enum)]
+        map: Option<OnOff>,
+    },
 }
 
 /// Bottle that a command operates on and that should receive its log file.
@@ -155,7 +249,8 @@ pub fn log_bottle(command: &BottleCommand) -> Option<&str> {
         | BottleCommand::Kill { id, .. }
         | BottleCommand::Reg { id, .. }
         | BottleCommand::Preset { id, .. }
-        | BottleCommand::Tool { id, .. } => Some(id),
+        | BottleCommand::Tool { id, .. }
+        | BottleCommand::Graphics { id, .. } => Some(id),
         _ => None,
     }
 }
@@ -236,8 +331,205 @@ pub fn run(command: BottleCommand, dirs: &AppDirs, config: &Config) -> Result<Ex
             };
             return Ok(exit_code(launch::run_tool(&runtime, tool)?));
         }
+        BottleCommand::Graphics {
+            id,
+            appid,
+            backend,
+            metal_hud,
+            metal_hud_log,
+            dxvk_hud,
+            sync,
+            cpu_count,
+            json,
+        } => {
+            let update = SettingsUpdate {
+                metal_hud: metal_hud.map(Toggle::update),
+                metal_hud_log: metal_hud_log.map(Toggle::update),
+                dxvk_hud: dxvk_hud.map(|spec| match spec.as_str() {
+                    "inherit" => None,
+                    "off" => Some(String::new()),
+                    _ => Some(spec),
+                }),
+                sync: sync.map(|s| match s {
+                    SyncArg::None => Some(SyncMode::None),
+                    SyncArg::Esync => Some(SyncMode::Esync),
+                    SyncArg::Msync => Some(SyncMode::Msync),
+                    SyncArg::Inherit => None,
+                }),
+                cpu_count: cpu_count
+                    .map(|n| match n.as_str() {
+                        "inherit" => Ok(None),
+                        _ => n.parse().map(Some).with_context(|| {
+                            format!("--cpu-count expects a number or `inherit`, got {n:?}")
+                        }),
+                    })
+                    .transpose()?,
+            };
+            let backend = backend.map(GraphicsBackend::from);
+            graphics_command(dirs, &id, appid, backend, update, json)?;
+        }
+        BottleCommand::Fps { file, json } => fps(&file, json)?,
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn graphics_command(
+    dirs: &AppDirs,
+    id: &str,
+    appid: Option<u32>,
+    backend: Option<GraphicsBackend>,
+    update: SettingsUpdate,
+    json: bool,
+) -> Result<()> {
+    let store = BottleStore::new(dirs);
+    let changed = backend.is_some() || !update.is_empty();
+    match appid {
+        Some(appid) if changed => {
+            update_game_profile(
+                dirs,
+                id,
+                appid,
+                ProfileUpdate {
+                    backend,
+                    graphics: update,
+                    ..Default::default()
+                },
+            )?;
+        }
+        None if changed => {
+            let mut bottle = store.load(id)?;
+            if let Some(backend) = backend {
+                validate_backend(&bottle, backend)?;
+                bottle.backend = backend;
+            }
+            update.apply(&mut bottle.graphics)?;
+            store.save(&bottle)?;
+            tracing::info!(bottle = id, "bottle graphics settings changed");
+        }
+        _ => {}
+    }
+
+    let bottle = store.load(id)?;
+    let engine_id = bottle
+        .engine
+        .clone()
+        .ok_or_else(|| anyhow!("bottle {id} has no engine"))?;
+    let engine = EngineGraphics::load(dirs, &engine_id)?;
+    let program = appid.and_then(|a| game_profile(&bottle, a));
+    if let (Some(appid), None) = (appid, program) {
+        println!("No settings for {appid} in {id}; showing the bottle's.");
+    }
+    let plan = graphics::plan(&bottle, &engine, program)?;
+    if json {
+        let value = serde_json::json!({
+            "bottle": id,
+            "appid": appid,
+            "engine": engine_id,
+            "engine_features": engine.features,
+            "d3dmetal_overlay": engine.d3dmetal.as_ref().map(|o| o.dir.clone()),
+            "plan": plan,
+        });
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(());
+    }
+    print_plan(&engine, &plan);
+    Ok(())
+}
+
+fn print_plan(engine: &EngineGraphics, plan: &GraphicsPlan) {
+    let name = |b: GraphicsBackend| match b {
+        GraphicsBackend::D3dMetal => "d3dmetal",
+        GraphicsBackend::Dxvk => "dxvk",
+    };
+    let effective = match plan.effective {
+        graphics::EffectiveBackend::D3dMetal => "D3DMetal (engine overlay)",
+        graphics::EffectiveBackend::Dxvk => "DXVK + MoltenVK",
+        graphics::EffectiveBackend::Wined3d => "Wine's built-in Direct3D (wined3d)",
+    };
+    println!("Backend:       {} -> {effective}", name(plan.requested));
+    println!("Wine:          {}", plan.wine.display());
+    let s = &plan.settings;
+    let opt = |v: Option<bool>| match v {
+        Some(true) => "on",
+        Some(false) => "off",
+        None => "inherit",
+    };
+    println!(
+        "Settings:      metal-hud {}, metal-hud-log {}, dxvk-hud {}, sync {}, cpu-count {}",
+        opt(s.metal_hud),
+        opt(s.metal_hud_log),
+        match s.dxvk_hud.as_deref() {
+            None => "inherit",
+            Some("") => "off",
+            Some(spec) => spec,
+        },
+        match s.sync {
+            None => "inherit",
+            Some(SyncMode::None) => "none",
+            Some(SyncMode::Esync) => "esync",
+            Some(SyncMode::Msync) => "msync",
+        },
+        s.cpu_count
+            .map_or_else(|| "inherit".to_owned(), |n| n.to_string()),
+    );
+    let pairs = |m: &std::collections::BTreeMap<String, String>| {
+        if m.is_empty() {
+            "-".to_owned()
+        } else {
+            m.iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+    };
+    println!("Environment:   {}", pairs(&plan.env));
+    println!("DLL overrides: {}", pairs(&plan.dll_overrides));
+    let f = engine.features;
+    let yes = |b: bool| if b { "yes" } else { "no" };
+    if f.inspected {
+        println!(
+            "Engine {}: esync {}, msync {}, CPU count limit {}, Retina mode {}, D3DMetal overlay {}",
+            engine.engine_id,
+            yes(f.esync),
+            yes(f.msync),
+            yes(f.cpu_count_override),
+            yes(f.retina_mode),
+            yes(engine.d3dmetal.is_some()),
+        );
+    } else {
+        println!("Engine {}: could not be inspected", engine.engine_id);
+    }
+    for w in &plan.warnings {
+        println!("warning: {w}");
+    }
+    for n in &plan.notes {
+        println!("note: {n}");
+    }
+}
+
+fn fps(file: &std::path::Path, json: bool) -> Result<()> {
+    let text = std::fs::read(file)
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .with_context(|| format!("could not read {}", file.display()))?;
+    let Some(summary) = cross_bottle::bench::summarize(&text) else {
+        bail!(
+            "no `metal-HUD:` lines in {}; enable them with `cross bottle graphics <id> --metal-hud-log on`",
+            file.display()
+        );
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+    } else {
+        println!(
+            "{} s, {} frames: average {:.1} FPS (min {}, max {} per second)",
+            summary.seconds, summary.frames, summary.avg_fps, summary.min_fps, summary.max_fps
+        );
+        println!(
+            "mean present interval {:.3}, mean GPU time {:.3} (Metal HUD units)",
+            summary.mean_present_interval, summary.mean_gpu_time
+        );
+    }
+    Ok(())
 }
 
 fn list(dirs: &AppDirs, manager: &BottleManager<'_>, json: bool) -> Result<()> {
@@ -363,6 +655,34 @@ fn preset(dirs: &AppDirs, id: &str, command: PresetCommand) -> Result<()> {
                 println!("Virtual desktop enabled: {w}x{h}.");
             }
         }
+        PresetCommand::Retina { state } => {
+            runtime.set_retina_mode(state.on())?;
+            println!(
+                "Retina mode {}; it applies to programs started from now on.",
+                if state.on() { "on" } else { "off" }
+            );
+        }
+        PresetCommand::Gamepad { sdl, hidraw, map } => {
+            let options = GamepadOptions {
+                sdl: sdl.map(OnOff::on),
+                hidraw: hidraw.map(OnOff::on),
+                map_controllers: map.map(OnOff::on),
+            };
+            if options != GamepadOptions::default() {
+                runtime.set_gamepad_options(&options)?;
+                println!(
+                    "Saved; restart the bottle (cross bottle kill {id}) for it to take effect."
+                );
+            }
+            let status = runtime.gamepad_status()?;
+            let state = |on: bool| if on { "on" } else { "off" };
+            println!(
+                "SDL {}, IOHID (hidraw) {}, map to XInput {}",
+                state(status.sdl),
+                state(status.hidraw),
+                state(status.map_controllers)
+            );
+        }
     }
     Ok(())
 }
@@ -380,7 +700,7 @@ pub struct RunArgs {
 }
 
 pub fn run_program(args: RunArgs, dirs: &AppDirs) -> Result<ExitCode> {
-    let (_, runtime) = Runtime::open(dirs, &args.bottle)?;
+    let (bottle, _) = Runtime::open(dirs, &args.bottle)?;
     // Given a folder, Wine opens it in its file manager (explorer.exe) and
     // `cross run` blocks until that window is closed.
     if std::path::Path::new(args.target.trim()).is_dir() {
@@ -409,6 +729,13 @@ pub fn run_program(args: RunArgs, dirs: &AppDirs) -> Result<ExitCode> {
             .dll_overrides
             .insert(dll.to_owned(), mode.to_owned());
     }
+    // The bottle's graphics settings; what was given on the command line wins.
+    let plan = graphics::plan_for(dirs, &bottle, None)?;
+    plan.apply_to(&mut profile);
+    for warning in &plan.warnings {
+        eprintln!("warning: {warning}");
+    }
+    let runtime = plan.runtime(dirs, &bottle.id);
 
     let outcome = launch::run_with(
         &runtime,
