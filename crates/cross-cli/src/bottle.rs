@@ -755,12 +755,14 @@ pub fn run_program(args: RunArgs, dirs: &AppDirs) -> Result<ExitCode> {
         Ok(_) => TelemetryOutcome::ExitedWithError,
         Err(_) => TelemetryOutcome::FailedToStart,
     };
-    cross_telemetry::record_launch(
-        dirs,
-        bottle.engine.as_deref(),
-        Some(plan.requested),
-        telemetry_outcome,
-    );
+    // What actually ran, not what was asked for: without GPTK a d3dmetal
+    // request falls back to Wine's own Direct3D, which has no backend value.
+    let effective = match plan.effective {
+        graphics::EffectiveBackend::D3dMetal => Some(GraphicsBackend::D3dMetal),
+        graphics::EffectiveBackend::Dxvk => Some(GraphicsBackend::Dxvk),
+        graphics::EffectiveBackend::Wined3d => None,
+    };
+    cross_telemetry::record_launch(dirs, bottle.engine.as_deref(), effective, telemetry_outcome);
     let outcome = result?;
     if let (false, Some(log)) = (outcome.status.success(), &outcome.log) {
         eprintln!(
