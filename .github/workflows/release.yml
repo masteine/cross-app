@@ -1,0 +1,171 @@
+name: Release
+
+# Tag vX.Y.Z -> fmt/clippy/test, build the arm64 CLI, package a DMG, and attach
+# everything to a DRAFT GitHub Release (a person publishes it).
+# Signing and notarization run only when the secrets below exist; without them the
+# artifacts are clearly named "-unsigned". See docs/packaging.md.
+# Written in Sprint 9; never run (the repository has no remote yet).
+#
+# Secrets (all optional, but signing needs the first three and notarization needs
+# signing plus one credential set):
+#   APPLE_CERTIFICATE             base64 of the Developer ID Application .p12
+#   APPLE_CERTIFICATE_PASSWORD    password of that .p12
+#   APPLE_SIGNING_IDENTITY        "Developer ID Application: Name (TEAMID)"
+#   APPLE_API_KEY, APPLE_API_ISSUER, APPLE_API_KEY_P8   App Store Connect API key id,
+#                                 issuer UUID and the .p8 file contents (preferred), or
+#   APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID             Apple ID + app-specific password
+#   TAURI_SIGNING_PRIVATE_KEY, TAURI_SIGNING_PRIVATE_KEY_PASSWORD   updater key (Sprint 6 GUI)
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: # dry run from any branch: builds and uploads workflow artifacts only
+
+permissions:
+  contents: write # gh release create
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  release:
+    name: build, test, package
+    runs-on: macos-15 # Apple Silicon
+    timeout-minutes: 90
+    env:
+      DIST_DIR: ${{ github.workspace }}/dist
+      # The secrets context is not available in step `if:`; expose presence via env.
+      HAVE_SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_SIGNING_IDENTITY != '' }}
+      HAVE_NOTARY: ${{ (secrets.APPLE_API_KEY != '' && secrets.APPLE_API_ISSUER != '' && secrets.APPLE_API_KEY_P8 != '') || (secrets.APPLE_ID != '' && secrets.APPLE_PASSWORD != '' && secrets.APPLE_TEAM_ID != '') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Tag matches the workspace version
+        if: github.ref_type == 'tag'
+        run: |
+          source packaging/macos/common.sh
+          version="$(workspace_version)"
+          if [[ "v$version" != "$GITHUB_REF_NAME" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+      - name: Build the CLI (release profile)
+        run: packaging/macos/build-cli.sh
+
+      - name: Import the Developer ID certificate into a temporary keychain
+        if: env.HAVE_SIGNING == 'true'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/release.keychain-db"
+          password="$(openssl rand -base64 32)"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain"
+          # Add to the search list so codesign can build the certificate chain.
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          security find-identity -v -p codesigning "$keychain"
+          echo "SIGN_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+
+      - name: Sign the CLI (hardened runtime)
+        if: env.HAVE_SIGNING == 'true'
+        env:
+          SIGN_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          packaging/macos/sign.sh "$DIST_DIR/cross"
+          packaging/macos/build-cli.sh --archive-only
+
+      - name: Name unsigned artifacts as such
+        if: env.HAVE_SIGNING != 'true'
+        run: |
+          source packaging/macos/common.sh
+          echo "DMG_NAME=cross-app-$(workspace_version)-arm64-unsigned.dmg" >> "$GITHUB_ENV"
+          echo "::warning::no signing secrets: building UNSIGNED artifacts (Gatekeeper will block them)"
+
+      # Sprint 6 hook: build the GUI here and pass it to make-dmg.sh, e.g.
+      #   TAURI_SIDECAR_DIR=crates/cross-gui/src-tauri/binaries packaging/macos/build-cli.sh
+      #   (cd crates/cross-gui && cargo tauri build --bundles app)   # signs with APPLE_* env
+      #   APP_BUNDLE="<path to the built .app>" packaging/macos/make-dmg.sh
+      # The updater artifacts (.app.tar.gz + .sig) need TAURI_SIGNING_PRIVATE_KEY(+_PASSWORD).
+      - name: Build the disk image
+        run: packaging/macos/make-dmg.sh
+
+      - name: Sign the disk image
+        if: env.HAVE_SIGNING == 'true'
+        env:
+          SIGN_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: packaging/macos/sign.sh "$DIST_DIR"/*.dmg
+
+      - name: Notarize and staple the disk image
+        if: env.HAVE_SIGNING == 'true' && env.HAVE_NOTARY == 'true'
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [[ -n "$APPLE_API_KEY_P8" ]]; then
+            export APPLE_API_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+            printf '%s\n' "$APPLE_API_KEY_P8" > "$APPLE_API_KEY_PATH"
+          fi
+          packaging/macos/notarize.sh "$DIST_DIR"/*.dmg
+          rm -f "$RUNNER_TEMP/AuthKey.p8"
+
+      - name: Checksums
+        run: |
+          cd "$DIST_DIR"
+          shasum -a 256 *.dmg *.tar.gz | tee SHA256SUMS
+
+      - name: Render the Homebrew formula
+        if: github.ref_type == 'tag'
+        run: |
+          source packaging/macos/common.sh
+          version="$(workspace_version)"
+          repo="https://github.com/$GITHUB_REPOSITORY"
+          url="$repo/archive/refs/tags/$GITHUB_REF_NAME.tar.gz"
+          sha256="$(curl -fsSL "$url" | shasum -a 256 | cut -d' ' -f1)"
+          packaging/homebrew/render.sh packaging/homebrew/cross-app-cli.rb.in \
+            "$DIST_DIR/cross-app-cli.rb" VERSION="$version" URL="$url" SHA256="$sha256" \
+            HOMEPAGE="$repo" HEAD_URL="$repo.git"
+          # The cask (packaging/homebrew/cross-app.rb.in) is rendered once the GUI DMG exists.
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cross-app-${{ github.ref_name }}
+          path: |
+            dist/*.dmg
+            dist/*.tar.gz
+            dist/SHA256SUMS
+            dist/*.rb
+          if-no-files-found: error
+
+      - name: Create a draft GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd "$DIST_DIR"
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag --generate-notes \
+            *.dmg *.tar.gz SHA256SUMS cross-app-cli.rb
+
+      - name: Delete the temporary keychain
+        if: always() && env.SIGN_KEYCHAIN != ''
+        run: security delete-keychain "$SIGN_KEYCHAIN"

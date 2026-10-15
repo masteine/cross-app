@@ -18,10 +18,14 @@ cross-core = { path = "../cross-core" }
 cross-deps = { path = "../cross-deps" }
 cross-engine = { path = "../cross-engine" }
 cross-steam = { path = "../cross-steam" }
+cross-telemetry = { path = "../cross-telemetry" }
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
