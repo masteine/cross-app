@@ -21,6 +21,7 @@ use cross_steam::launch::{game_profile, update_game_profile, validate_backend, P
 
 use crate::prompt::confirm;
 use crate::steam::BackendArg;
+use cross_telemetry::Outcome as TelemetryOutcome;
 
 /// `on`, `off` or `inherit` (from the bottle, or Wine's default).
 #[derive(Clone, Copy, ValueEnum)]
@@ -737,7 +738,7 @@ pub fn run_program(args: RunArgs, dirs: &AppDirs) -> Result<ExitCode> {
     }
     let runtime = plan.runtime(dirs, &bottle.id);
 
-    let outcome = launch::run_with(
+    let result = launch::run_with(
         &runtime,
         &LaunchRequest {
             target: args.target,
@@ -747,7 +748,20 @@ pub fn run_program(args: RunArgs, dirs: &AppDirs) -> Result<ExitCode> {
             flags: args.flags,
         },
         &args.options,
-    )?;
+    );
+    // Recorded only if the user opted in (`cross telemetry enable`); never blocks.
+    let telemetry_outcome = match &result {
+        Ok(o) if o.status.success() => TelemetryOutcome::Success,
+        Ok(_) => TelemetryOutcome::ExitedWithError,
+        Err(_) => TelemetryOutcome::FailedToStart,
+    };
+    cross_telemetry::record_launch(
+        dirs,
+        bottle.engine.as_deref(),
+        Some(plan.requested),
+        telemetry_outcome,
+    );
+    let outcome = result?;
     if let (false, Some(log)) = (outcome.status.success(), &outcome.log) {
         eprintln!(
             "Program exited with {}; Wine output: {}",

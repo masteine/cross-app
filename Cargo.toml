@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/cross-core", "crates/cross-engine", "crates/cross-bottle", "crates/cross-deps", "crates/cross-steam", "crates/cross-compat", "crates/cross-cli"]
+members = ["crates/cross-core", "crates/cross-engine", "crates/cross-bottle", "crates/cross-deps", "crates/cross-steam", "crates/cross-compat", "crates/cross-telemetry", "crates/cross-cli"]
 
 [workspace.package]
 version = "0.0.1"
@@ -28,3 +28,10 @@ unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+
+# Distribution builds (Sprint 9, docs/packaging.md). Debug info is stripped from
+# the shipped binary; panics still unwind so error messages stay readable.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

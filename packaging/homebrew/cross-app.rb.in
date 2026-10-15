@@ -1,0 +1,26 @@
+# Homebrew cask TEMPLATE for the GUI app (Sprint 6) -- rendered by render.sh, not usable as is.
+# Placeholders: @VERSION@ @SHA256@ @URL@ @HOMEPAGE@ @APP_NAME@
+# Intended for our own tap (e.g. `brew tap <owner>/cross-app`), not homebrew/cask: official
+# casks must pass Gatekeeper, which needs the Developer ID signing + notarization of Sprint 9.
+# Stanza syntax checked against docs.brew.sh/Cask-Cookbook and Homebrew 7.0.2 sources.
+cask "cross-app" do
+  version "@VERSION@"
+  sha256 "@SHA256@"
+
+  url "@URL@"
+  name "cross-app"
+  desc "Run Windows games and apps on Apple Silicon Macs through Wine"
+  homepage "@HOMEPAGE@"
+
+  depends_on arch: :arm64
+  depends_on macos: :sonoma
+
+  app "@APP_NAME@"
+  # The CLI embedded by Tauri's bundle.externalBin. It conflicts with the `cross-app-cli`
+  # formula, which installs the same `cross` command.
+  binary "#{appdir}/@APP_NAME@/Contents/MacOS/cross"
+
+  zap trash: [
+    "~/Library/Application Support/cross-app",
+  ]
+end

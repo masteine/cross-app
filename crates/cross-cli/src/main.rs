@@ -11,6 +11,7 @@ mod logs;
 mod progress;
 mod prompt;
 mod steam;
+mod telemetry;
 
 use std::process::ExitCode;
 use std::time::Instant;
@@ -115,6 +116,11 @@ enum Command {
         #[command(subcommand)]
         command: compat::CompatCommand,
     },
+    /// Opt-in anonymous launch statistics (off by default, nothing is sent)
+    Telemetry {
+        #[command(subcommand)]
+        command: telemetry::TelemetryCommand,
+    },
     /// Local crash reports (never uploaded): list, show, clear
     Crash {
         #[command(subcommand)]
@@ -136,6 +142,7 @@ impl Command {
             Command::Diag(_) => "diag",
             Command::Crossover { .. } => "crossover",
             Command::Compat { .. } => "compat",
+            Command::Telemetry { .. } => "telemetry",
             Command::Crash { .. } => "crash",
         }
     }
@@ -165,6 +172,7 @@ fn log_bottle(command: &Command) -> Option<&str> {
         | Command::Engine { .. }
         | Command::Diag(_)
         | Command::Crossover { .. }
+        | Command::Telemetry { .. }
         | Command::Crash { .. } => None,
     }
 }
@@ -260,6 +268,7 @@ fn dispatch(command: Command, dirs: &AppDirs, config: &Config) -> Result<ExitCod
         Command::Diag(args) => diag::run(&args, dirs, config),
         Command::Crossover { command } => crossover::run(command, dirs),
         Command::Compat { command } => compat::run(command, dirs),
+        Command::Telemetry { command } => telemetry::run(command, dirs),
         Command::Crash { command } => crash::run(command, dirs),
         Command::Run {
             bottle,

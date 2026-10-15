@@ -1,0 +1,38 @@
+# Homebrew formula TEMPLATE for the `cross` CLI -- rendered by render.sh, not usable as is.
+# Placeholders: @VERSION@ @SHA256@ @URL@ @HOMEPAGE@ @HEAD_URL@
+# @URL@ is the source tarball of the release tag (GitHub serves one per tag). Builds from
+# source with cargo, like other Rust formulae; std_cargo_args(path:) is Homebrew's helper
+# (Formula#std_cargo_args, checked in Homebrew 7.0.2 sources).
+class CrossAppCli < Formula
+  desc "Run Windows games and apps on Apple Silicon Macs through Wine (CLI)"
+  homepage "@HOMEPAGE@"
+  url "@URL@"
+  version "@VERSION@"
+  sha256 "@SHA256@"
+  license "MIT"
+  head "@HEAD_URL@", branch: "main"
+
+  depends_on "rust" => :build
+  depends_on arch: :arm64
+  depends_on macos: :sonoma
+
+  def install
+    system "cargo", "install", *std_cargo_args(path: "crates/cross-cli")
+  end
+
+  def caveats
+    <<~EOS
+      cross downloads Wine engines on demand (`cross engine install ...`); Rosetta 2 is
+      required by the current engines (`cross engine install-rosetta`).
+      Data lives in ~/Library/Application Support/cross-app and is kept on uninstall.
+    EOS
+  end
+
+  test do
+    # A self-contained check that needs no network, Wine or Rosetta: an empty data
+    # directory has no bottles.
+    ENV["CROSS_APP_HOME"] = testpath/"home"
+    assert_match "cross #{version}", shell_output("#{bin}/cross --version")
+    assert_equal "[]", shell_output("#{bin}/cross bottle list --json").strip
+  end
+end
