@@ -5,6 +5,7 @@
 //! an engine installed by `cross-engine`; it never talks to a UI.
 
 pub mod bench;
+pub mod crossover;
 mod error;
 pub mod exec;
 pub mod graphics;

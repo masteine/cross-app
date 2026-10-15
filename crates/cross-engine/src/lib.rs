@@ -1,16 +1,23 @@
 //! Wine engine management: catalog, verified downloads, installation,
 //! Game Porting Toolkit import and Rosetta setup.
 //!
+//! An engine's [`cross_core::model::Translation`] drives how it is installed
+//! and run (see [`policy`]): Rosetta and native engines are downloaded,
+//! external ones (CrossOver, see [`crossover`]) are found on the system.
+//!
 //! Long operations report progress through a `FnMut(Progress)` callback so any
 //! front end (CLI today, GUI later) can render it.
 
 pub mod catalog;
+pub mod crossover;
 pub mod d3dmetal;
 pub mod download;
 mod error;
 pub mod features;
 pub mod gptk;
+pub mod macho;
 pub mod manager;
+pub mod policy;
 pub mod rosetta;
 
 pub use error::{Error, Result};

@@ -58,6 +58,41 @@ pub enum Error {
         "engine {engine:?} does not have the expected `bin/../lib/wine/x86_64-windows` layout"
     )]
     UnsupportedLayout { engine: String },
+    #[error(
+        "engine {id:?} runs x86_64 Wine through Rosetta 2, which is not installed; \
+         run `cross engine install-rosetta` or use a native or external engine"
+    )]
+    RosettaRequired { id: String },
+    #[error("engine {id:?} is declared native, but {path} is {found}, not arm64")]
+    NotNative {
+        id: String,
+        path: PathBuf,
+        found: String,
+    },
+    #[error("engine {id:?} needs {requirement}; this Mac has {found}")]
+    Unsupported {
+        id: String,
+        requirement: String,
+        found: String,
+    },
+    #[error("{what} not found (looked in: {})", format_paths(.searched))]
+    ExternalNotFound {
+        what: String,
+        searched: Vec<PathBuf>,
+    },
+    #[error("engine {id:?} points to {path}, which no longer exists; reinstall or re-register it")]
+    ExternalMissing { id: String, path: PathBuf },
+}
+
+fn format_paths(paths: &[PathBuf]) -> String {
+    if paths.is_empty() {
+        return "nowhere".to_owned();
+    }
+    paths
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 impl Error {

@@ -20,6 +20,28 @@ pub enum Translation {
     External,
 }
 
+impl Translation {
+    /// The engine's Wine is x86_64 code that only runs through Rosetta 2.
+    pub fn requires_rosetta(self) -> bool {
+        self == Translation::Rosetta
+    }
+
+    /// Engines of this kind are downloaded from the catalog; external engines
+    /// are found on the system instead.
+    pub fn is_downloaded(self) -> bool {
+        self != Translation::External
+    }
+
+    /// Name used in manifests, `engine.toml` and CLI output.
+    pub fn name(self) -> &'static str {
+        match self {
+            Translation::Rosetta => "rosetta",
+            Translation::Native => "native",
+            Translation::External => "external",
+        }
+    }
+}
+
 /// How Direct3D calls reach Metal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -118,7 +140,7 @@ pub struct Engine {
 
 impl Engine {
     pub fn requires_rosetta(&self) -> bool {
-        self.translation == Translation::Rosetta
+        self.translation.requires_rosetta()
     }
 }
 
@@ -353,5 +375,32 @@ mod tests {
         assert!(e.requires_rosetta());
         e.translation = Translation::Native;
         assert!(!e.requires_rosetta());
+    }
+
+    #[test]
+    fn translation_names_match_serde_and_download_policy() {
+        for t in [
+            Translation::Rosetta,
+            Translation::Native,
+            Translation::External,
+        ] {
+            assert_eq!(serialized(t), t.name());
+        }
+        assert!(Translation::Rosetta.is_downloaded());
+        assert!(Translation::Native.is_downloaded());
+        assert!(!Translation::External.is_downloaded());
+    }
+
+    /// The string serde writes for a `Translation`.
+    fn serialized(t: Translation) -> String {
+        #[derive(Serialize)]
+        struct W {
+            t: Translation,
+        }
+        let text = toml::to_string(&W { t }).unwrap();
+        text.trim()
+            .trim_start_matches("t = ")
+            .trim_matches('"')
+            .to_owned()
     }
 }

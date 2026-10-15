@@ -9,6 +9,7 @@ use std::fs;
 
 use cross_core::model::{GraphicsBackend, Translation};
 use cross_core::paths::AppDirs;
+use cross_core::system::MacVersion;
 use serde::Deserialize;
 
 use crate::{Error, Result};
@@ -33,14 +34,35 @@ impl Archive {
     }
 }
 
+/// Products whose own Wine we can drive as an external engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExternalKind {
+    /// CodeWeavers CrossOver, installed by the user.
+    Crossover,
+}
+
+/// One engine in the manifest. Its `translation` decides how it is installed
+/// and run: `rosetta` and `native` engines are downloaded from `archive`,
+/// `external` ones are looked up on the system (`external` says what to find).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct EngineEntry {
     pub id: String,
     pub name: String,
+    /// Wine version of a downloaded engine; external engines report their own.
+    #[serde(default)]
     pub wine_version: String,
     #[serde(default)]
     pub translation: Translation,
-    pub archive: Archive,
+    /// Required for downloaded engines, absent for external ones.
+    #[serde(default)]
+    pub archive: Option<Archive>,
+    /// Required for external engines.
+    #[serde(default)]
+    pub external: Option<ExternalKind>,
+    /// Oldest macOS the engine runs on, e.g. `"26.5"` for ARM64 Wine.
+    #[serde(default)]
+    pub min_macos: Option<String>,
     /// Graphics backends this engine can be used with.
     #[serde(default)]
     pub backends: Vec<GraphicsBackend>,
@@ -56,7 +78,12 @@ pub struct EngineEntry {
 
 impl EngineEntry {
     pub fn requires_rosetta(&self) -> bool {
-        self.translation == Translation::Rosetta
+        self.translation.requires_rosetta()
+    }
+
+    /// `min_macos` parsed; validated when the catalog is loaded.
+    pub fn min_macos(&self) -> Option<MacVersion> {
+        self.min_macos.as_deref().and_then(MacVersion::parse)
     }
 
     pub fn supports_dxvk(&self) -> bool {
@@ -140,10 +167,13 @@ impl Catalog {
                 return bad(format!("duplicate id {id:?}"));
             }
         }
+        for engine in &self.engines {
+            validate_source(engine)?;
+        }
         let archives = self
             .engines
             .iter()
-            .map(|e| (&e.id, &e.archive))
+            .filter_map(|e| e.archive.as_ref().map(|a| (&e.id, a)))
             .chain(self.components.iter().map(|c| (&c.id, &c.archive)));
         for (id, archive) in archives {
             if !archive.url.starts_with("https://") {
@@ -176,6 +206,34 @@ impl Catalog {
     }
 }
 
+/// Where an engine comes from must match its translation.
+fn validate_source(engine: &EngineEntry) -> Result<()> {
+    let id = &engine.id;
+    let bad = |msg: &str| Err(Error::InvalidCatalog(format!("{id}: {msg}")));
+    match (
+        engine.translation.is_downloaded(),
+        &engine.archive,
+        engine.external,
+    ) {
+        (true, None, _) => return bad("downloaded engines need an archive"),
+        (true, _, Some(_)) => return bad("only external engines may set `external`"),
+        (false, Some(_), _) => {
+            return bad("external engines are found on the system, not downloaded")
+        }
+        (false, _, None) => return bad("external engines must say what to look for in `external`"),
+        _ => {}
+    }
+    if engine.translation.is_downloaded() && engine.wine_version.is_empty() {
+        return bad("downloaded engines need a wine_version");
+    }
+    if let Some(min) = &engine.min_macos {
+        if MacVersion::parse(min).is_none() {
+            return bad(&format!("min_macos {min:?} is not a macOS version"));
+        }
+    }
+    Ok(())
+}
+
 /// Engine and component ids become directory names: keep them path-safe.
 pub fn validate_id(id: &str) -> Result<()> {
     let ok_char =
@@ -202,7 +260,10 @@ mod tests {
         let engine = catalog.engine("wine-devel-11.18").unwrap();
         assert!(engine.requires_rosetta());
         assert!(engine.supports_dxvk());
-        assert_eq!(engine.archive.file_name(), "wine-devel-11.18-osx64.tar.xz");
+        assert_eq!(
+            engine.archive.as_ref().unwrap().file_name(),
+            "wine-devel-11.18-osx64.tar.xz"
+        );
         for cid in &engine.components {
             assert!(catalog.component(cid).is_some());
         }
@@ -266,6 +327,58 @@ mod tests {
         })
         .unwrap_err();
         assert!(err.to_string().contains("moltenvk"), "{err}");
+    }
+
+    #[test]
+    fn crossover_is_an_external_engine_without_a_download() {
+        let catalog = Catalog::builtin();
+        let cx = catalog.engine("crossover").unwrap();
+        assert_eq!(cx.translation, Translation::External);
+        assert_eq!(cx.external, Some(ExternalKind::Crossover));
+        assert!(cx.archive.is_none());
+        assert!(!cx.requires_rosetta());
+    }
+
+    #[test]
+    fn source_must_match_translation() {
+        let err = catalog_with(|v| {
+            v["engines"][0]["archive"] = serde_json::Value::Null;
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("need an archive"), "{err}");
+
+        let err = catalog_with(|v| v["engines"][0]["external"] = "crossover".into()).unwrap_err();
+        assert!(err.to_string().contains("only external"), "{err}");
+
+        let err = catalog_with(|v| {
+            v["engines"][2]["archive"] = v["engines"][0]["archive"].clone();
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("not downloaded"), "{err}");
+
+        let err = catalog_with(|v| {
+            v["engines"][2]["external"] = serde_json::Value::Null;
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("what to look for"), "{err}");
+    }
+
+    #[test]
+    fn a_native_engine_is_added_by_manifest_only() {
+        let catalog = catalog_with(|v| {
+            let mut native = v["engines"][0].clone();
+            native["id"] = "wine-arm64-test".into();
+            native["translation"] = "native".into();
+            native["min_macos"] = "26.5".into();
+            v["engines"].as_array_mut().unwrap().push(native);
+        })
+        .unwrap();
+        let native = catalog.engine("wine-arm64-test").unwrap();
+        assert!(!native.requires_rosetta());
+        assert_eq!(native.min_macos(), Some(MacVersion::new(26, 5, 0)));
+
+        let err = catalog_with(|v| v["engines"][0]["min_macos"] = "soon".into()).unwrap_err();
+        assert!(err.to_string().contains("min_macos"), "{err}");
     }
 
     #[test]

@@ -555,11 +555,13 @@ exit 0
                 name: "Eng".into(),
                 wine_version: "1".into(),
                 translation: Translation::Rosetta,
-                archive: Archive {
+                archive: Some(Archive {
                     url: "https://x/e".into(),
                     sha256: "0".repeat(64),
                     size: None,
-                },
+                }),
+                external: None,
+                min_macos: None,
                 backends: vec![],
                 components: vec![],
                 gptk_capable: false,

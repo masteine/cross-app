@@ -8,11 +8,11 @@ use std::process::ExitCode;
 use anyhow::Result;
 use clap::Subcommand;
 use cross_core::config::Config;
-use cross_core::model::Translation;
 use cross_core::paths::AppDirs;
 use cross_core::system::{self, GptkInfo};
 use cross_engine::catalog::Catalog;
 use cross_engine::manager::{EngineManager, InstallOptions};
+use cross_engine::policy::{self, Host};
 use cross_engine::{gptk, rosetta};
 
 #[derive(Subcommand)]
@@ -26,7 +26,7 @@ pub enum EngineCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Download, verify and install an engine from the catalog
+    /// Install an engine from the catalog (downloaded, or found on the system for external ones like CrossOver)
     Install {
         /// Engine id, as shown by `cross engine list`
         id: String,
@@ -199,14 +199,6 @@ fn d3dmetal(dirs: &AppDirs, config: &Config, command: D3dMetalCommand) -> Result
     Ok(ExitCode::SUCCESS)
 }
 
-fn translation_name(t: Translation) -> &'static str {
-    match t {
-        Translation::Rosetta => "rosetta",
-        Translation::Native => "native",
-        Translation::External => "external",
-    }
-}
-
 fn list(dirs: &AppDirs, config: &Config, only_installed: bool, json: bool) -> Result<ExitCode> {
     let catalog = Catalog::load(dirs)?;
     let installed = EngineManager::new(dirs).list()?;
@@ -223,7 +215,7 @@ fn list(dirs: &AppDirs, config: &Config, only_installed: bool, json: bool) -> Re
                 "id": e.id,
                 "name": e.name,
                 "wine_version": e.wine_version,
-                "translation": translation_name(e.translation),
+                "translation": e.translation.name(),
                 "installed": local.is_some(),
                 "dxvk_installed": local.is_some_and(|l| l.has_dxvk()),
                 "in_catalog": true,
@@ -236,7 +228,7 @@ fn list(dirs: &AppDirs, config: &Config, only_installed: bool, json: bool) -> Re
             "id": local.id,
             "name": local.name,
             "wine_version": local.wine_version,
-            "translation": translation_name(local.translation),
+            "translation": local.translation.name(),
             "installed": true,
             "dxvk_installed": local.has_dxvk(),
             "in_catalog": false,
@@ -288,11 +280,8 @@ fn list(dirs: &AppDirs, config: &Config, only_installed: bool, json: bool) -> Re
 fn install(dirs: &AppDirs, id: &str, dxvk: bool) -> Result<ExitCode> {
     let catalog = Catalog::load(dirs)?;
     if let Some(entry) = catalog.engine(id) {
-        if entry.requires_rosetta() && !system::rosetta_installed() {
-            eprintln!(
-                "warning: {id} needs Rosetta 2, which is not installed; \
-                 run `cross engine install-rosetta`"
-            );
+        for warning in policy::install_warnings(entry, &Host::detect()) {
+            eprintln!("warning: {warning}");
         }
     }
 
@@ -310,6 +299,15 @@ fn install(dirs: &AppDirs, id: &str, dxvk: bool) -> Result<ExitCode> {
     renderer.finish();
     let installed = result?;
 
+    if !installed.translation.is_downloaded() {
+        println!(
+            "Registered {} {} ({}); nothing was downloaded.",
+            installed.id,
+            installed.wine_version,
+            manager.wine_path(&installed).display()
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
     println!(
         "Installed {} (Wine {}){}.",
         installed.id,

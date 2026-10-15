@@ -4,6 +4,7 @@ use std::fmt;
 
 use serde::Serialize;
 
+use crate::model::{Engine, Translation};
 use crate::system::{MacVersion, SystemInfo};
 
 /// Oldest macOS we consider usable at all.
@@ -12,6 +13,8 @@ const MIN_MACOS: MacVersion = MacVersion::new(14, 0, 0);
 const RECOMMENDED_MACOS: MacVersion = MacVersion::new(15, 0, 0);
 /// First macOS where Rosetta 2 shrinks to a subset for legacy games.
 const ROSETTA_LIMITED_FROM: u32 = 28;
+const ROSETTA: &str = "Rosetta 2";
+const ENGINES: &str = "engines";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -76,6 +79,77 @@ pub fn evaluate(info: &SystemInfo) -> Report {
     }
 }
 
+/// [`evaluate`] plus what depends on the installed engines: Rosetta only matters
+/// when an installed engine needs it, and an `engines` check tells whether any
+/// installed engine can run on this Mac.
+pub fn evaluate_with_engines(info: &SystemInfo, engines: &[Engine]) -> Report {
+    let mut report = evaluate(info);
+    let needs_rosetta = engines.iter().any(Engine::requires_rosetta);
+    if !engines.is_empty() && !needs_rosetta {
+        if let Some(check) = report.checks.iter_mut().find(|c| c.name == ROSETTA) {
+            let state = if info.rosetta_installed {
+                "installed"
+            } else {
+                "not installed"
+            };
+            *check = Check::new(
+                ROSETTA,
+                Status::Ok,
+                format!("{state}; not needed by the installed engines"),
+            );
+        }
+    }
+    report.checks.push(check_engines(info, engines));
+    report
+}
+
+/// Can an engine of this kind run on this Mac right now?
+fn engine_runnable(info: &SystemInfo, translation: Translation) -> bool {
+    match translation {
+        Translation::Rosetta => info.rosetta_installed && !rosetta_limited(info),
+        Translation::Native => info.arch == "aarch64",
+        // Found on the system by `cross engine install`; the owning app checks itself.
+        Translation::External => true,
+    }
+}
+
+fn rosetta_limited(info: &SystemInfo) -> bool {
+    info.macos.is_some_and(|v| v.major >= ROSETTA_LIMITED_FROM)
+}
+
+fn check_engines(info: &SystemInfo, engines: &[Engine]) -> Check {
+    if engines.is_empty() {
+        return Check::new(
+            ENGINES,
+            Status::Warn,
+            "none installed (see `cross engine list`)",
+        );
+    }
+    let list = engines
+        .iter()
+        .map(|e| format!("{} ({})", e.id, e.translation.name()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if engines.iter().any(|e| engine_runnable(info, e.translation)) {
+        return Check::new(ENGINES, Status::Ok, list);
+    }
+    let reason = if rosetta_limited(info) {
+        format!(
+            "macOS {ROSETTA_LIMITED_FROM}+ keeps Rosetta only for legacy games and Wine is not \
+             known to qualify; install a native or external engine (e.g. CrossOver)"
+        )
+    } else if !info.rosetta_installed {
+        "they need Rosetta 2, which is not installed (cross engine install-rosetta)".to_owned()
+    } else {
+        "native engines need an Apple Silicon Mac".to_owned()
+    };
+    Check::new(
+        ENGINES,
+        Status::Warn,
+        format!("{list}: none can run here; {reason}"),
+    )
+}
+
 fn check_arch(info: &SystemInfo) -> Check {
     match info.arch.as_str() {
         "aarch64" => Check::new("architecture", Status::Ok, "arm64 (Apple Silicon)"),
@@ -121,16 +195,16 @@ fn check_rosetta(info: &SystemInfo) -> Check {
     let limited = info.macos.is_some_and(|v| v.major >= ROSETTA_LIMITED_FROM);
     match (info.rosetta_installed, limited) {
         (_, true) => Check::new(
-            "Rosetta 2",
+            ROSETTA,
             Status::Warn,
             format!(
                 "macOS {ROSETTA_LIMITED_FROM}+ keeps only a legacy-games subset of Rosetta; \
                  use an engine that does not need it"
             ),
         ),
-        (true, false) => Check::new("Rosetta 2", Status::Ok, "installed"),
+        (true, false) => Check::new(ROSETTA, Status::Ok, "installed"),
         (false, false) => Check::new(
-            "Rosetta 2",
+            ROSETTA,
             Status::Warn,
             "not installed; required by Intel Wine engines (install: softwareupdate --install-rosetta)",
         ),
@@ -243,6 +317,83 @@ mod tests {
             .checks
             .iter()
             .any(|c| c.detail.contains("legacy-games")));
+    }
+
+    fn engine(id: &str, translation: Translation) -> Engine {
+        Engine {
+            id: id.into(),
+            wine_version: "11".into(),
+            translation,
+        }
+    }
+
+    fn detail_of(report: &Report, name: &str) -> String {
+        report
+            .checks
+            .iter()
+            .find(|c| c.name == name)
+            .unwrap()
+            .detail
+            .clone()
+    }
+
+    #[test]
+    fn engines_check_lists_installed_engines() {
+        let engines = [
+            engine("wine-devel-11.18", Translation::Rosetta),
+            engine("crossover", Translation::External),
+        ];
+        let report = evaluate_with_engines(&healthy(), &engines);
+        assert!(!report.has_warnings(), "{report:?}");
+        assert_eq!(
+            detail_of(&report, "engines"),
+            "wine-devel-11.18 (rosetta), crossover (external)"
+        );
+
+        let none = evaluate_with_engines(&healthy(), &[]);
+        assert_eq!(status_of(&none, "engines"), Status::Warn);
+    }
+
+    #[test]
+    fn rosetta_engines_without_rosetta_cannot_run() {
+        let mut info = healthy();
+        info.rosetta_installed = false;
+        let report = evaluate_with_engines(&info, &[engine("w", Translation::Rosetta)]);
+        assert_eq!(status_of(&report, "Rosetta 2"), Status::Warn);
+        assert_eq!(status_of(&report, "engines"), Status::Warn);
+        assert!(detail_of(&report, "engines").contains("install-rosetta"));
+    }
+
+    #[test]
+    fn rosetta_is_not_needed_without_rosetta_engines() {
+        let mut info = healthy();
+        info.rosetta_installed = false;
+        let report = evaluate_with_engines(&info, &[engine("arm", Translation::Native)]);
+        assert!(!report.has_warnings(), "{report:?}");
+        assert!(detail_of(&report, "Rosetta 2").contains("not needed"));
+
+        // Even on macOS 28 the Rosetta limit does not matter then.
+        info.macos = Some(MacVersion::new(28, 0, 0));
+        let report = evaluate_with_engines(&info, &[engine("cx", Translation::External)]);
+        assert!(!report.has_warnings(), "{report:?}");
+    }
+
+    #[test]
+    fn only_rosetta_engines_on_macos_28_is_flagged() {
+        let mut info = healthy();
+        info.macos = Some(MacVersion::new(28, 0, 0));
+        let report = evaluate_with_engines(&info, &[engine("w", Translation::Rosetta)]);
+        assert_eq!(status_of(&report, "engines"), Status::Warn);
+        assert!(detail_of(&report, "engines").contains("native or external"));
+
+        let mixed = evaluate_with_engines(
+            &info,
+            &[
+                engine("w", Translation::Rosetta),
+                engine("arm", Translation::Native),
+            ],
+        );
+        assert_eq!(status_of(&mixed, "engines"), Status::Ok);
     }
 
     #[test]

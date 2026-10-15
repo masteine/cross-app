@@ -3,6 +3,7 @@
 mod bottle;
 mod compat;
 mod crash;
+mod crossover;
 mod deps;
 mod diag;
 mod engine;
@@ -104,6 +105,11 @@ enum Command {
     Logs(logs::LogsArgs),
     /// Collect logs, settings and system info into an archive for bug reports
     Diag(diag::DiagArgs),
+    /// CrossOver as an external engine: status, its bottles, import
+    Crossover {
+        #[command(subcommand)]
+        command: crossover::CrossoverCommand,
+    },
     /// Game compatibility profiles: search, show, apply, sync
     Compat {
         #[command(subcommand)]
@@ -128,6 +134,7 @@ impl Command {
             Command::Steam { .. } => "steam",
             Command::Logs(_) => "logs",
             Command::Diag(_) => "diag",
+            Command::Crossover { .. } => "crossover",
             Command::Compat { .. } => "compat",
             Command::Crash { .. } => "crash",
         }
@@ -157,6 +164,7 @@ fn log_bottle(command: &Command) -> Option<&str> {
         Command::Doctor { .. }
         | Command::Engine { .. }
         | Command::Diag(_)
+        | Command::Crossover { .. }
         | Command::Crash { .. } => None,
     }
 }
@@ -250,6 +258,7 @@ fn dispatch(command: Command, dirs: &AppDirs, config: &Config) -> Result<ExitCod
         Command::Steam { command } => steam::run(command, dirs, config),
         Command::Logs(args) => logs::run(&args, dirs),
         Command::Diag(args) => diag::run(&args, dirs, config),
+        Command::Crossover { command } => crossover::run(command, dirs),
         Command::Compat { command } => compat::run(command, dirs),
         Command::Crash { command } => crash::run(command, dirs),
         Command::Run {
