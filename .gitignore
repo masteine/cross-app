@@ -1,4 +1,38 @@
+# Rust build output
 /target
-.omc/
-.DS_Store
+**/*.rs.bk
+*.pdb
+
+# Packaging output (scripts in packaging/, see docs/packaging.md)
 /dist
+*.dmg
+*.tar.gz
+
+# Diagnostics archives from `cross diag`
+cross-diag-*.tar.gz
+
+# Signing material and secrets: never commit
+*.p12
+*.cer
+*.mobileprovision
+*.pem
+*.key
+.env
+.env.*
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Editors and IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local agent tooling state
+.omc/
+.claude/settings.local.json
